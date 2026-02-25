@@ -13,9 +13,11 @@ const JWT_SECRET  = process.env.JWT_SECRET || 'knb_secret_2025';
 const OWNER_EMAIL = process.env.OWNER_EMAIL|| 'foxi@knb.com';
 const OWNER_PASS  = process.env.OWNER_PASS || 'admin005';
 
-// БД хранится в /tmp (Railway разрешает) + резервная копия
-const DB_PATH     = '/tmp/knb_db.json';
-const DB_BACKUP   = path.join(__dirname, 'knb_db_backup.json');
+
+const DATA_DIR = process.env.DATA_DIR || '/data';
+const DB_PATH  = require('path').join(DATA_DIR, 'knb_db.json');
+const DB_BACKUP = require('path').join(DATA_DIR, 'knb_db_backup.json');
+
 
 const app    = express();
 const server = http.createServer(app);
@@ -34,6 +36,9 @@ app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 let DB = { users:[], posts:[], commPosts:[], communities:[], commMembers:[], friendships:[], messages:[], groups:[], verReqs:[], bans:[], notifications:[] };
 
 async function loadDB() {
+  // Создать директорию если не существует
+  await fs.ensureDir(DATA_DIR).catch(()=>{});
+  await fs.ensureDir('/tmp').catch(()=>{});
   // Попробовать загрузить основную, потом резервную
   for (const p of [DB_PATH, DB_BACKUP]) {
     try {
