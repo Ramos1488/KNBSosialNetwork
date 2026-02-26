@@ -216,6 +216,8 @@ header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 1.2
     <button class="ni" data-p="friends"><i class="fas fa-user-friends"></i> Друзья</button>
     <button class="ni" data-p="messages"><i class="fas fa-envelope"></i> Сообщения</button>
     <button class="ni" data-p="communities"><i class="fas fa-users"></i> Сообщества</button>
+    <button class="ni" data-p="forum" id="forumbtn" onclick="goForum()" style="display:none"><i class="fas fa-comments"></i> Форум</button>
+    <button class="ni" data-p="complaints" id="compbtn" onclick="goComplaints()" style="display:none"><i class="fas fa-flag"></i> Жалобы</button>
     <button class="ni" data-p="notifications"><i class="fas fa-bell"></i> Уведомления</button>
     <div class="nsep"></div>
     <button class="ni" data-p="settings"><i class="fas fa-cog"></i> Настройки</button>
@@ -235,19 +237,19 @@ header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 1.2
           <i class="fas fa-scroll" style="color:var(--purple)"></i>
           <span>Правила KNB</span>
         </div>
-        <div class="supp-item" onclick="openSupport('forum')">
+        <div class="supp-item" onclick="goForum()">
           <i class="fas fa-comments" style="color:var(--green)"></i>
           <span>Форум</span>
         </div>
-        <div class="supp-item" onclick="openSupport('report')">
+        <div class="supp-item" onclick="goComplaints()">
           <i class="fas fa-flag" style="color:var(--yellow)"></i>
-          <span>Пожаловаться</span>
+          <span>Жалобы</span>
         </div>
       </div>
     </div>
     <div style="text-align:center;padding:.85rem .5rem;border:1px solid var(--border);border-radius:14px;background:var(--bg2)">
       <div style="font-family:'Unbounded',sans-serif;font-size:.85rem;font-weight:900;color:var(--blue);margin-bottom:.3rem">KNB<span style="color:var(--txt)">.</span></div>
-      <div style="font-size:.69rem;color:var(--txt2);line-height:1.5">© 2025 KNB Social<br>Все права защищены</div>
+      <div style="font-size:.69rem;color:var(--txt2);line-height:1.5">© 2026 KNB Social<br>Все права защищены</div>
       <div style="font-size:.65rem;color:var(--border);margin-top:.4rem">v2.0</div>
     </div>
   </aside>
@@ -612,6 +614,8 @@ function renderHdr(){
 
 function renderNav(){
   document.querySelectorAll('.ni[data-p]').forEach(b=>b.classList.toggle('active',b.dataset.p===PAGE));
+  const fb=document.getElementById('forumbtn');if(fb)fb.style.display=me?'flex':'none';
+  const cb=document.getElementById('compbtn');if(cb)cb.style.display=me?'flex':'none';
   const ab=document.getElementById('admbtn'); if(ab) ab.style.display=isOwner()?'flex':'none';
 }
 
@@ -656,7 +660,11 @@ function renderPage(){
     case 'admin':         renderAdmin(); break;
   }
 }
-function goPage(p){PAGE=p;if(p!=='messages')chatId=null;renderNav();renderHdr();renderPage();}
+function goPage(p){
+  if(p==='forum'){goForum();return;}
+  if(p==='complaints'){goComplaints();return;}
+  PAGE=p;if(p!=='messages')chatId=null;renderNav();renderHdr();renderPage();
+}
 
 // ── ЛЕНТА ─────────────────────────────────────────
 function renderFeed(){
@@ -1330,7 +1338,8 @@ function renderAdmin(){
   const tabs=[
     {id:'overview',l:'📊 Обзор'},{id:'users',l:'👥 Пользователи'},
     {id:'posts',l:'📝 Посты'},{id:'comms',l:'🏘 Сообщества'},
-    {id:'verify',l:'✅ Верификация'},{id:'broadcast',l:'📢 Рассылка'}
+    {id:'verify',l:'✅ Верификация'},{id:'roles',l:'🎭 Роли'},
+    {id:'complaints',l:'🚩 Жалобы'},{id:'broadcast',l:'📢 Рассылка'}
   ];
   let body='';
   if(ADMTAB==='overview'){
@@ -1399,6 +1408,44 @@ function renderAdmin(){
             <button class="btn bs bsm" onclick="adm_rejectV('${r.id}')">❌</button>
           </div></div>`:''}).join('')||`<p style="color:var(--txt2)">Нет заявок</p>`;
       }catch(e){const el=document.getElementById('verify-content');if(el)el.innerHTML=`<p style="color:var(--red)">${esc(e.message)}</p>`;}
+    },0);
+  }
+  else if(ADMTAB==='roles'){
+    body=`<p style="color:var(--txt2);font-size:.84rem;margin-bottom:1rem">Назначь роли персонала сайта. Только Владелец может это делать.</p>
+    <div style="background:var(--bg3);border-radius:12px;padding:.85rem;margin-bottom:1rem;font-size:.82rem;display:flex;flex-direction:column;gap:.3rem">
+      <div>👑 <b>Владелец</b> — полный доступ (только вы)</div>
+      <div>🛡️ <b>Администратор</b> — управление сайтом, ответы на жалобы/форум</div>
+      <div>⚡ <b>Модератор</b> — ответы на форум/жалобы, закрытие тем</div>
+      <div>🤝 <b>Помощник</b> — только ответы на форум/жалобы</div>
+    </div>
+    ${allUsers.filter(u=>u.email!==OWNER_EMAIL).map(u=>`<div class="ur">
+      <div class="ava-wrap"><img class="ava" src="${u.avatar||ava(u.name)}" onerror="this.src='${ava(u.name)}'">${odot(u.id)}</div>
+      <div class="uri"><div class="un">${esc(u.name)}${u.verified?' ✅':''}</div><div class="us">${esc(u.username)}</div></div>
+      <select onchange="adm_setSiteRole('${u.id}',this.value)" style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.3rem .6rem;color:var(--txt);font-family:'Manrope',sans-serif;font-size:.82rem">
+        ${['admin','moderator','helper','user'].map(r=>`<option value="${r}" ${(u.siteRole||'user')===r?'selected':''}>${{admin:'🛡️ Администратор',moderator:'⚡ Модератор',helper:'🤝 Помощник',user:'👤 Пользователь'}[r]}</option>`).join('')}
+      </select>
+    </div>`).join('')}`;
+  }
+  else if(ADMTAB==='complaints'){
+    body=`<div id="adm-complaints-wrap"><span class="spin"></span></div>`;
+    setTimeout(async()=>{
+      try{
+        const comps=await GET('/complaints');
+        const el=document.getElementById('adm-complaints-wrap');if(!el)return;
+        el.innerHTML=comps.map(comp=>{
+          const st=COMPLAINT_STATUS[comp.status]||COMPLAINT_STATUS.pending;
+          return `<div class="ur" style="cursor:pointer;align-items:flex-start" onclick="openComplaint('${comp.id}')">
+            <div class="uri">
+              <div class="un" style="flex-wrap:wrap;gap:.3rem">
+                <span style="color:${st.color};font-size:.75rem;font-weight:700">${st.label}</span>
+                ${comp.author?`<span style="color:var(--txt2);font-weight:400">от ${esc(comp.author.name||'?')}</span>`:''}
+              </div>
+              <div class="us">${esc(comp.text.substring(0,80))}</div>
+              <div style="font-size:.72rem;color:var(--txt2)">${ago(comp.ts)} · 💬 ${(comp.replies||[]).length}</div>
+            </div>
+          </div>`;
+        }).join('')||`<p style="color:var(--txt2)">Нет жалоб</p>`;
+      }catch(e){const el=document.getElementById('adm-complaints-wrap');if(el)el.innerHTML=`<p style="color:var(--red)">${esc(e.message)}</p>`;}
     },0);
   }
   else if(ADMTAB==='broadcast'){
@@ -1565,11 +1612,415 @@ function openSupport(section){
         </div>`).join('')}
     </div>
     <div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border);text-align:center">
-      <div style="font-size:.78rem;color:var(--txt2)">© 2025 KNB Social · Все права защищены</div>
+      <div style="font-size:.78rem;color:var(--txt2)">© 2026 KNB Social · Все права защищены</div>
       <div style="font-size:.72rem;color:var(--border);margin-top:.2rem">По вопросам: @foxi</div>
     </div>
   </div>`;
   document.body.appendChild(div);
+}
+
+
+// ══════════════════════════════════════════════════
+//  РОЛИ САЙТА
+// ══════════════════════════════════════════════════
+const SITE_ROLES = {
+  owner:     {label:'Владелец',    color:'#f59e0b', icon:'👑', badge:'bg:#f59e0b'},
+  admin:     {label:'Администратор',color:'#ef4444',icon:'🛡️', badge:'bg:#ef4444'},
+  moderator: {label:'Модератор',   color:'#a855f7', icon:'⚡', badge:'bg:#a855f7'},
+  helper:    {label:'Помощник',    color:'#22c55e', icon:'🤝', badge:'bg:#22c55e'},
+  user:      {label:'Пользователь',color:'#6b7280', icon:'',   badge:''},
+};
+function getSiteRole(user){
+  if(!user) return 'user';
+  if(user.email===OWNER_EMAIL) return 'owner';
+  return user.siteRole||'user';
+}
+function isStaff(user){ return ['owner','admin','moderator','helper'].includes(getSiteRole(user)); }
+function siteRoleBadge(user){
+  const r=getSiteRole(user); const info=SITE_ROLES[r];
+  if(!info||r==='user') return '';
+  return `<span style="font-size:.68rem;font-weight:700;color:${info.color};background:${info.color}18;padding:.1rem .45rem;border-radius:8px">${info.icon} ${info.label}</span>`;
+}
+
+// ══════════════════════════════════════════════════
+//  ФОРУМ
+// ══════════════════════════════════════════════════
+const FORUM_CATS = {
+  general:    {label:'Общее',        icon:'💬', color:'var(--blue)'},
+  suggestion: {label:'Предложение',  icon:'💡', color:'var(--yellow)'},
+  bug:        {label:'Баг/Ошибка',   icon:'🐛', color:'var(--red)'},
+  appeal:     {label:'Жалоба на администратора', icon:'⚖️', color:'var(--purple)'},
+  other:      {label:'Другое',       icon:'📌', color:'var(--txt2)'},
+};
+const COMPLAINT_STATUS = {
+  pending:    {label:'Ожидает',       color:'var(--yellow)'},
+  reviewing:  {label:'Рассматривается',color:'var(--blue)'},
+  resolved:   {label:'Решена',        color:'var(--green)'},
+  rejected:   {label:'Отклонена',     color:'var(--red)'},
+};
+
+let forumPosts=[], currentForumPost=null;
+let complaints=[], currentComplaint=null;
+
+async function goForum(){
+  PAGE='forum'; renderNav();
+  const c=document.getElementById('cnt');
+  c.innerHTML=`<div style="text-align:center;padding:3rem"><span class="spin"></span></div>`;
+  try{
+    forumPosts=await GET('/forum');
+    renderForumList();
+  }catch(e){c.innerHTML=`<p style="color:var(--red)">${esc(e.message)}</p>`;}
+}
+
+function renderForumList(){
+  const c=document.getElementById('cnt');
+  const pinned=forumPosts.filter(p=>p.pinned);
+  const normal=forumPosts.filter(p=>!p.pinned);
+  const myRole=getSiteRole(me);
+  c.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;flex-wrap:wrap;gap:.5rem">
+      <h2 style="font-family:'Unbounded',sans-serif;font-size:1rem">💬 Форум</h2>
+      <button class="btn bp bsm" onclick="showCreateForumPost()"><i class="fas fa-plus"></i> Новая тема</button>
+    </div>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem">
+      ${Object.entries(FORUM_CATS).map(([k,v])=>`<button class="btn bs bsm" onclick="filterForum('${k}')" id="fcat-${k}" style="font-size:.78rem">${v.icon} ${v.label}</button>`).join('')}
+      <button class="btn bs bsm" onclick="filterForum(null)" style="font-size:.78rem">Все</button>
+    </div>
+    <div id="forum-list">${buildForumItems([...pinned,...normal])}</div>`;
+}
+
+function buildForumItems(posts){
+  if(!posts.length) return `<p style="color:var(--txt2);text-align:center;padding:2rem">Нет тем</p>`;
+  return posts.map(p=>{
+    const cat=FORUM_CATS[p.category]||FORUM_CATS.other;
+    const statusColor=p.status==='closed'?'var(--txt2)':'var(--green)';
+    return `<div class="pc" style="cursor:pointer" onclick="openForumPost('${p.id}')">
+      <div style="display:flex;align-items:flex-start;gap:.75rem">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.3rem">
+            ${p.pinned?'<span style="font-size:.72rem;color:var(--yellow)">📌 Закреплено</span>':''}
+            <span style="font-size:.72rem;font-weight:700;color:${cat.color}">${cat.icon} ${cat.label}</span>
+            <span style="font-size:.72rem;color:${statusColor}">${p.status==='closed'?'🔒 Закрыто':'🟢 Открыто'}</span>
+          </div>
+          <div style="font-weight:700;font-size:.95rem;margin-bottom:.25rem">${esc(p.title)}</div>
+          <div style="color:var(--txt2);font-size:.83rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:400px">${esc(p.text)}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:.72rem;color:var(--txt2)">${ago(p.ts)}</div>
+          <div style="font-size:.78rem;color:var(--txt2);margin-top:.2rem">💬 ${p.replyCount||0}</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:.4rem;margin-top:.5rem">
+        <img src="${p.author?.avatar||ava(p.author?.name||'?')}" style="width:18px;height:18px;border-radius:50%;object-fit:cover">
+        <span style="font-size:.75rem;color:var(--txt2)">${esc(p.author?.name||'?')}</span>
+        ${siteRoleBadge(p.author)}
+        ${p.author?.verified?'<i class="fas fa-check-circle" style="color:var(--blue);font-size:.7rem"></i>':''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterForum(cat){
+  const items=cat?forumPosts.filter(p=>p.category===cat):forumPosts;
+  document.getElementById('forum-list').innerHTML=buildForumItems(items);
+}
+
+function showCreateForumPost(){
+  const old=document.getElementById('forum-create-modal');if(old)old.remove();
+  const div=document.createElement('div');div.id='forum-create-modal';div.className='mo open';
+  div.addEventListener('click',e=>{if(e.target===div)div.remove();});
+  div.innerHTML=`<div class="mb" style="max-width:540px">
+    <button class="mc" onclick="document.getElementById('forum-create-modal').remove()"><i class="fas fa-times"></i></button>
+    <h2>💬 Новая тема</h2>
+    <div class="fg"><label>Заголовок</label><input id="fc-title" placeholder="Кратко опишите тему..." maxlength="100"></div>
+    <div class="fg"><label>Категория</label>
+      <select id="fc-cat" style="width:100%;padding:.68rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:12px;color:var(--txt);font-family:'Manrope',sans-serif;font-size:.9rem;outline:none">
+        ${Object.entries(FORUM_CATS).map(([k,v])=>`<option value="${k}">${v.icon} ${v.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="fg"><label>Описание</label><textarea id="fc-text" rows="5" placeholder="Подробно опишите..."></textarea></div>
+    <div class="fg"><label><i class="fas fa-image"></i> Фото (необязательно)</label><input id="fc-img" type="file" accept="image/*"></div>
+    <button class="btn bp" id="fc-btn" onclick="submitForumPost()"><i class="fas fa-paper-plane"></i> Отправить</button>
+  </div>`;
+  document.body.appendChild(div);
+}
+
+async function submitForumPost(){
+  const title=(document.getElementById('fc-title').value||'').trim();
+  const text=(document.getElementById('fc-text').value||'').trim();
+  const cat=document.getElementById('fc-cat').value;
+  if(!title){toast('Укажите заголовок','err');return;}
+  if(!text){toast('Укажите текст','err');return;}
+  const btn=document.getElementById('fc-btn');btn.disabled=true;btn.innerHTML='<span class="spin"></span>';
+  let img=null;
+  const f=document.getElementById('fc-img').files[0];
+  if(f){try{img=await rf(f);}catch{}}
+  try{
+    const post=await POST('/forum',{title,text,category:cat,img});
+    forumPosts.unshift({...post,replyCount:0,author:{name:me.name,avatar:me.avatar,verified:me.verified,siteRole:me.siteRole||'user'}});
+    document.getElementById('forum-create-modal').remove();
+    renderForumList();
+    toast('Тема создана!','ok');
+  }catch(e){toast(e.message,'err');}
+  btn.disabled=false;btn.innerHTML='<i class="fas fa-paper-plane"></i> Отправить';
+}
+
+async function openForumPost(id){
+  const c=document.getElementById('cnt');
+  c.innerHTML=`<div style="text-align:center;padding:3rem"><span class="spin"></span></div>`;
+  try{
+    const post=await GET('/forum/'+id);
+    currentForumPost=post;
+    renderForumPost(post);
+  }catch(e){c.innerHTML=`<p style="color:var(--red)">${esc(e.message)}</p>`;}
+}
+
+function renderForumPost(post){
+  const c=document.getElementById('cnt');
+  const cat=FORUM_CATS[post.category]||FORUM_CATS.other;
+  const canReply=isStaff(me)||(post.authorId===me.id);
+  const canManage=isStaff(me);
+  c.innerHTML=`
+    <button class="btn bs bsm" style="margin-bottom:.75rem" onclick="goForum()"><i class="fas fa-arrow-left"></i> Форум</button>
+    <div class="pc">
+      <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem">
+        <span style="font-size:.78rem;font-weight:700;color:${cat.color}">${cat.icon} ${cat.label}</span>
+        <span style="font-size:.75rem;color:${post.status==='closed'?'var(--txt2)':'var(--green)'}">${post.status==='closed'?'🔒 Закрыто':'🟢 Открыто'}</span>
+        ${post.pinned?'<span style="font-size:.72rem;color:var(--yellow)">📌 Закреплено</span>':''}
+      </div>
+      <h2 style="font-family:'Unbounded',sans-serif;font-size:1rem;margin-bottom:.75rem">${esc(post.title)}</h2>
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem">
+        <div style="position:relative"><img src="${post.author?.avatar||ava(post.author?.name||'?')}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">${odot(post.authorId)}</div>
+        <div>
+          <div style="font-weight:700;font-size:.88rem;display:flex;align-items:center;gap:.3rem">
+            ${esc(post.author?.name||'?')}${post.author?.verified?'<i class="fas fa-check-circle" style="color:var(--blue);font-size:.75rem"></i>':''}
+            ${siteRoleBadge(post.author)}
+          </div>
+          <div style="color:var(--txt2);font-size:.75rem">${ago(post.ts)}</div>
+        </div>
+      </div>
+      <div class="ptxt">${esc(post.text)}</div>
+      ${post.img?`<img src="${post.img}" class="pimg" onclick="openLB(this.src)">`:''}
+      ${canManage?`<div style="display:flex;gap:.5rem;margin-top:.75rem;padding-top:.75rem;border-top:1px solid var(--border);flex-wrap:wrap">
+        <button class="btn bs bsm" onclick="toggleForumStatus('${post.id}')">${post.status==='open'?'🔒 Закрыть':'🟢 Открыть'}</button>
+        <button class="btn bs bsm" onclick="toggleForumPin('${post.id}')">${post.pinned?'📌 Открепить':'📌 Закрепить'}</button>
+        <button class="btn bd bsm" onclick="showConfirm('Удалить тему?','',()=>deleteForumPost('${post.id}'))">🗑 Удалить</button>
+      </div>`:''}
+    </div>
+    <!-- Ответы -->
+    <h3 style="font-family:'Unbounded',sans-serif;font-size:.82rem;color:var(--txt2);letter-spacing:.5px;margin:.75rem 0">ОТВЕТЫ (${(post.replies||[]).length})</h3>
+    <div id="forum-replies">
+      ${(post.replies||[]).map(r=>buildReplyHtml(r)).join('')||`<p style="color:var(--txt2);font-size:.85rem;text-align:center;padding:1rem 0">Ответов пока нет</p>`}
+    </div>
+    ${canReply&&post.status==='open'?`
+    <div class="pc" style="margin-top:.75rem">
+      <div style="font-weight:700;font-size:.85rem;margin-bottom:.75rem">${isStaff(me)?'✍️ Ответ персонала':'✍️ Ответить'}</div>
+      <div class="fg"><textarea id="fp-reply" rows="3" placeholder="Ваш ответ..."></textarea></div>
+      <div class="fg"><label style="font-size:.8rem;color:var(--txt2)"><i class="fas fa-image"></i> Фото</label><input id="fp-reply-img" type="file" accept="image/*"></div>
+      <button class="btn bp bsm" id="fp-reply-btn" onclick="submitForumReply('${post.id}')"><i class="fas fa-paper-plane"></i> Отправить</button>
+    </div>`:`${post.status==='closed'?`<div style="text-align:center;padding:1rem;color:var(--txt2);background:var(--bg3);border-radius:12px;margin-top:.75rem">🔒 Тема закрыта</div>`:`<div style="text-align:center;padding:1rem;color:var(--txt2);background:var(--bg3);border-radius:12px;margin-top:.75rem">Только персонал может отвечать</div>`}`}`;
+}
+
+function buildReplyHtml(r){
+  const isStaffReply=isStaff(r.author);
+  return `<div class="pc" style="${isStaffReply?'border-color:var(--blue);background:rgba(79,142,247,.04)':''}">
+    ${isStaffReply?`<div style="font-size:.72rem;font-weight:700;color:var(--blue);margin-bottom:.4rem">👮 Ответ персонала</div>`:''}
+    <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
+      <div style="position:relative"><img src="${r.author?.avatar||ava(r.author?.name||'?')}" style="width:32px;height:32px;border-radius:50%;object-fit:cover">${odot(r.authorId)}</div>
+      <div>
+        <div style="font-weight:700;font-size:.85rem;display:flex;align-items:center;gap:.3rem">
+          ${esc(r.author?.name||'?')}${r.author?.verified?'<i class="fas fa-check-circle" style="color:var(--blue);font-size:.72rem"></i>':''}
+          ${siteRoleBadge(r.author)}
+        </div>
+        <div style="color:var(--txt2);font-size:.73rem">${ago(r.ts)}</div>
+      </div>
+    </div>
+    <div class="ptxt">${esc(r.text)}</div>
+    ${r.img?`<img src="${r.img}" class="pimg" onclick="openLB(this.src)">`:''}
+  </div>`;
+}
+
+async function submitForumReply(postId){
+  const text=(document.getElementById('fp-reply').value||'').trim();
+  if(!text){toast('Введите ответ','err');return;}
+  const btn=document.getElementById('fp-reply-btn');btn.disabled=true;btn.innerHTML='<span class="spin"></span>';
+  let img=null;
+  const f=document.getElementById('fp-reply-img').files[0];
+  if(f){try{img=await rf(f);}catch{}}
+  try{
+    const updated=await POST('/forum/'+postId+'/reply',{text,img});
+    currentForumPost=updated;
+    renderForumPost(updated);
+    toast('Ответ отправлен','ok');
+  }catch(e){toast(e.message,'err');btn.disabled=false;btn.innerHTML='<i class="fas fa-paper-plane"></i> Отправить';}
+}
+
+async function toggleForumStatus(id){
+  try{const p=await POST('/forum/'+id+'/status');currentForumPost=p;openForumPost(id);toast('Статус изменён','ok');}
+  catch(e){toast(e.message,'err');}
+}
+async function toggleForumPin(id){
+  try{await POST('/forum/'+id+'/pin');openForumPost(id);toast('Готово','ok');}
+  catch(e){toast(e.message,'err');}
+}
+async function deleteForumPost(id){
+  try{await DEL('/forum/'+id);toast('Тема удалена','ok');goForum();}
+  catch(e){toast(e.message,'err');}
+}
+
+// ══════════════════════════════════════════════════
+//  ЖАЛОБЫ
+// ══════════════════════════════════════════════════
+async function goComplaints(){
+  PAGE='complaints'; renderNav();
+  const c=document.getElementById('cnt');
+  c.innerHTML=`<div style="text-align:center;padding:3rem"><span class="spin"></span></div>`;
+  try{
+    complaints=await GET('/complaints');
+    renderComplaintsList();
+  }catch(e){c.innerHTML=`<p style="color:var(--red)">${esc(e.message)}</p>`;}
+}
+
+function renderComplaintsList(){
+  const c=document.getElementById('cnt');
+  const myRole=getSiteRole(me);
+  const canSeeAll=isStaff(me);
+  c.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;flex-wrap:wrap;gap:.5rem">
+      <h2 style="font-family:'Unbounded',sans-serif;font-size:1rem">🚩 ${canSeeAll?'Жалобы (все)':'Мои жалобы'}</h2>
+      <button class="btn bp bsm" onclick="showCreateComplaint()"><i class="fas fa-plus"></i> Подать жалобу</button>
+    </div>
+    ${!complaints.length?`<p style="color:var(--txt2);text-align:center;padding:2rem">Нет жалоб</p>`:''}
+    ${complaints.map(comp=>{
+      const st=COMPLAINT_STATUS[comp.status]||COMPLAINT_STATUS.pending;
+      return `<div class="pc" style="cursor:pointer" onclick="openComplaint('${comp.id}')">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+          <div>
+            <span style="font-size:.75rem;font-weight:700;color:${st.color};background:${st.color}18;padding:.15rem .55rem;border-radius:8px">${st.label}</span>
+            <span style="font-size:.75rem;color:var(--txt2);margin-left:.4rem">${ago(comp.ts)}</span>
+          </div>
+          <div style="font-size:.75rem;color:var(--txt2)">💬 ${(comp.replies||[]).length} ответов</div>
+        </div>
+        <div style="margin-top:.4rem;font-size:.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(comp.text)}</div>
+        ${canSeeAll&&comp.author?`<div style="font-size:.75rem;color:var(--txt2);margin-top:.25rem">от ${esc(comp.author.name||'?')}</div>`:''}
+      </div>`;
+    }).join('')}`;
+}
+
+function showCreateComplaint(){
+  const old=document.getElementById('comp-create-modal');if(old)old.remove();
+  const div=document.createElement('div');div.id='comp-create-modal';div.className='mo open';
+  div.addEventListener('click',e=>{if(e.target===div)div.remove();});
+  div.innerHTML=`<div class="mb" style="max-width:520px">
+    <button class="mc" onclick="document.getElementById('comp-create-modal').remove()"><i class="fas fa-times"></i></button>
+    <h2>🚩 Подать жалобу</h2>
+    <div class="fg"><label>Тип жалобы</label>
+      <select id="comp-type" style="width:100%;padding:.68rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:12px;color:var(--txt);font-family:'Manrope',sans-serif;font-size:.9rem;outline:none">
+        <option value="user">👤 На пользователя</option>
+        <option value="post">📝 На пост</option>
+        <option value="community">🏘 На сообщество</option>
+        <option value="admin">⚖️ На администратора</option>
+        <option value="other">📌 Другое</option>
+      </select>
+    </div>
+    <div class="fg"><label>Описание</label><textarea id="comp-text" rows="4" placeholder="Подробно опишите проблему..."></textarea></div>
+    <div class="fg"><label><i class="fas fa-image"></i> Скриншот (необязательно)</label><input id="comp-img" type="file" accept="image/*"></div>
+    <div style="background:var(--bg3);border-radius:12px;padding:.85rem;margin-bottom:1rem;font-size:.82rem;color:var(--txt2)">
+      <b>ℹ️ Важно:</b> Жалоба на администратора будет рассмотрена независимым персоналом. Ложные жалобы могут привести к блокировке.
+    </div>
+    <button class="btn bp" id="comp-btn" onclick="submitComplaint()"><i class="fas fa-paper-plane"></i> Отправить</button>
+  </div>`;
+  document.body.appendChild(div);
+}
+
+async function submitComplaint(){
+  const text=(document.getElementById('comp-text').value||'').trim();
+  const type=document.getElementById('comp-type').value;
+  if(!text){toast('Опишите проблему','err');return;}
+  const btn=document.getElementById('comp-btn');btn.disabled=true;btn.innerHTML='<span class="spin"></span>';
+  let img=null;
+  const f=document.getElementById('comp-img').files[0];
+  if(f){try{img=await rf(f);}catch{}}
+  try{
+    await POST('/complaints',{text,type,img});
+    document.getElementById('comp-create-modal').remove();
+    toast('Жалоба отправлена! Персонал рассмотрит её в ближайшее время.','ok');
+    goComplaints();
+  }catch(e){toast(e.message,'err');btn.disabled=false;btn.innerHTML='<i class="fas fa-paper-plane"></i> Отправить';}
+}
+
+async function openComplaint(id){
+  const comp=complaints.find(c=>c.id===id)||await GET('/complaints').then(list=>list.find(c=>c.id===id));
+  if(!comp) return;
+  currentComplaint=comp;
+  const old=document.getElementById('comp-modal');if(old)old.remove();
+  const canReply=isStaff(me);
+  const st=COMPLAINT_STATUS[comp.status]||COMPLAINT_STATUS.pending;
+  const div=document.createElement('div');div.id='comp-modal';div.className='mo open';
+  div.addEventListener('click',e=>{if(e.target===div)div.remove();});
+  div.innerHTML=`<div class="mb" style="max-width:560px">
+    <button class="mc" onclick="document.getElementById('comp-modal').remove()"><i class="fas fa-times"></i></button>
+    <h2>🚩 Жалоба</h2>
+    <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap">
+      <span style="font-size:.78rem;font-weight:700;color:${st.color};background:${st.color}18;padding:.2rem .65rem;border-radius:8px">${st.label}</span>
+      <span style="color:var(--txt2);font-size:.78rem">${ago(comp.ts)}</span>
+    </div>
+    <div style="background:var(--bg3);border-radius:12px;padding:.85rem;margin-bottom:.85rem">
+      <div style="font-size:.85rem;line-height:1.6">${esc(comp.text)}</div>
+      ${comp.img?`<img src="${comp.img}" style="max-width:100%;border-radius:8px;margin-top:.5rem" onclick="openLB(this.src)">`:''}
+    </div>
+    ${canReply?`<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem">
+      ${Object.entries(COMPLAINT_STATUS).map(([k,v])=>`<button class="btn bs bsm" style="color:${v.color};border-color:${v.color};font-size:.75rem" onclick="setComplaintStatus('${id}','${k}',this)">${v.label}</button>`).join('')}
+    </div>`:''}
+    <div id="comp-replies" style="max-height:260px;overflow-y:auto;margin-bottom:.85rem;display:flex;flex-direction:column;gap:.5rem">
+      ${(comp.replies||[]).map(r=>`<div style="background:${isStaff(r.author)?'rgba(79,142,247,.06)':'var(--bg3)'};border-radius:10px;padding:.65rem .85rem;border:1px solid ${isStaff(r.author)?'var(--blue)':'var(--border)'}">
+        ${isStaff(r.author)?`<div style="font-size:.7rem;color:var(--blue);font-weight:700;margin-bottom:.2rem">👮 ${esc(r.author?.name||'Персонал')} ${siteRoleBadge(r.author)}</div>`:''}
+        <div style="font-size:.86rem">${esc(r.text)}</div>
+        <div style="font-size:.7rem;color:var(--txt2);margin-top:.2rem">${ago(r.ts)}</div>
+      </div>`).join('')||`<p style="color:var(--txt2);text-align:center;font-size:.83rem;padding:.5rem 0">Нет ответов</p>`}
+    </div>
+    ${canReply?`<div style="display:flex;gap:.5rem">
+      <input id="comp-reply-inp" type="text" placeholder="Ответ..." style="flex:1;padding:.65rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:12px;color:var(--txt);font-family:'Manrope',sans-serif;font-size:.88rem;outline:none">
+      <button class="sbtn" onclick="sendComplaintReply('${id}')"><i class="fas fa-paper-plane"></i></button>
+    </div>`:''}
+  </div>`;
+  document.body.appendChild(div);
+}
+
+async function sendComplaintReply(id){
+  const inp=document.getElementById('comp-reply-inp');
+  const text=(inp.value||'').trim(); if(!text) return;
+  inp.value='';
+  try{
+    const updated=await POST('/complaints/'+id+'/reply',{text});
+    // обновить список
+    const idx=complaints.findIndex(c=>c.id===id);if(idx>=0)complaints[idx]=updated;
+    // обновить modal
+    document.getElementById('comp-modal').remove();
+    openComplaint(id);
+    toast('Ответ отправлен','ok');
+  }catch(e){toast(e.message,'err');}
+}
+
+async function setComplaintStatus(id, status, btn){
+  try{
+    await POST('/complaints/'+id+'/status',{status});
+    const idx=complaints.findIndex(c=>c.id===id);if(idx>=0)complaints[idx].status=status;
+    document.getElementById('comp-modal').remove();
+    openComplaint(id);
+    toast('Статус изменён','ok');
+  }catch(e){toast(e.message,'err');}
+}
+
+// ══════════════════════════════════════════════════
+//  РОЛИ САЙТА в админ-панели
+// ══════════════════════════════════════════════════
+async function adm_setSiteRole(uid, role){
+  try{
+    await POST('/admin/users/'+uid+'/siteRole',{role});
+    await loadAll(); me=allUsers.find(u=>u.id===me.id)||me;
+    renderAdmin();toast('Роль обновлена','ok');
+  }catch(e){toast(e.message,'err');}
 }
 
 async function init(){
