@@ -1,647 +1,280 @@
-const express  = require('express');
-const http     = require('http');
-const { WebSocketServer, WebSocket } = require('ws');
-const cors     = require('cors');
-const bcrypt   = require('bcryptjs');
-const jwt      = require('jsonwebtoken');
-const { v4: uuid } = require('uuid');
-const fs       = require('fs-extra');
-const path     = require('path');
+const express=require('express'),http=require('http'),{WebSocketServer,WebSocket}=require('ws'),cors=require('cors'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken'),{v4:uuid}=require('uuid'),path=require('path'),fs=require('fs');
+const PORT=process.env.PORT||3000,JWT_SECRET=process.env.JWT_SECRET||'knb2026',OWNER_EMAIL=process.env.OWNER_EMAIL||'foxi@knb.com',OWNER_PASS=process.env.OWNER_PASS||'admin005';
+const DATA_DIR=process.env.DATA_DIR||'/data';try{fs.mkdirSync(DATA_DIR,{recursive:true});}catch{}
+const DB_FILE=path.join(DATA_DIR,'knb.db');
+let DB;try{const S=require('better-sqlite3');DB=new S(DB_FILE);DB.pragma('journal_mode=WAL');DB.pragma('foreign_keys=ON');console.log('[DB]',DB_FILE);}catch(e){console.error('[DB]',e.message);process.exit(1);}
 
-const PORT        = process.env.PORT        || 3000;
-const JWT_SECRET  = process.env.JWT_SECRET  || 'knb_secret_2026';
-const OWNER_EMAIL = process.env.OWNER_EMAIL || 'foxi@knb.com';
-const OWNER_PASS  = process.env.OWNER_PASS  || 'admin005';
+DB.exec(`
+CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,name TEXT NOT NULL,username TEXT UNIQUE NOT NULL,bio TEXT DEFAULT '',avatar TEXT DEFAULT '',banner TEXT DEFAULT '',verified INTEGER DEFAULT 0,siteRole TEXT DEFAULT 'user',createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS posts(id TEXT PRIMARY KEY,authorId TEXT NOT NULL,text TEXT DEFAULT '',mediaUrl TEXT,mediaType TEXT,communityId TEXT,ts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS post_likes(postId TEXT,userId TEXT,PRIMARY KEY(postId,userId));
+CREATE TABLE IF NOT EXISTS comments(id TEXT PRIMARY KEY,postId TEXT NOT NULL,uid TEXT NOT NULL,text TEXT NOT NULL,ts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS communities(id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT DEFAULT '',avatar TEXT DEFAULT '',banner TEXT DEFAULT '',verified INTEGER DEFAULT 0,createdBy TEXT NOT NULL,ts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS comm_members(cid TEXT,uid TEXT,rank TEXT DEFAULT 'member',ts TEXT,PRIMARY KEY(cid,uid));
+CREATE TABLE IF NOT EXISTS friendships(id TEXT PRIMARY KEY,fromId TEXT,toId TEXT,status TEXT DEFAULT 'pending',ts TEXT);
+CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,chatId TEXT NOT NULL,senderId TEXT NOT NULL,text TEXT,img TEXT,voice TEXT,ts TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_msg ON messages(chatId);
+CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY,name TEXT NOT NULL,createdBy TEXT NOT NULL,ts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS group_members(groupId TEXT,userId TEXT,PRIMARY KEY(groupId,userId));
+CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,uid TEXT NOT NULL,text TEXT NOT NULL,read INTEGER DEFAULT 0,ts TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_notif ON notifications(uid);
+CREATE TABLE IF NOT EXISTS ver_requests(id TEXT PRIMARY KEY,uid TEXT,status TEXT DEFAULT 'pending',ts TEXT);
+CREATE TABLE IF NOT EXISTS bans(id TEXT PRIMARY KEY,uid TEXT,reason TEXT DEFAULT '',bannedBy TEXT,expiresAt TEXT,ts TEXT);
+CREATE TABLE IF NOT EXISTS mutes(id TEXT PRIMARY KEY,uid TEXT,reason TEXT DEFAULT '',mutedBy TEXT,expiresAt TEXT,ts TEXT);
+CREATE TABLE IF NOT EXISTS stories(id TEXT PRIMARY KEY,authorId TEXT NOT NULL,mediaUrl TEXT NOT NULL,mediaType TEXT DEFAULT 'image',text TEXT DEFAULT '',ts TEXT NOT NULL,expiresAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS story_views(storyId TEXT,userId TEXT,ts TEXT,PRIMARY KEY(storyId,userId));
+CREATE TABLE IF NOT EXISTS story_likes(storyId TEXT,userId TEXT,PRIMARY KEY(storyId,userId));
+CREATE TABLE IF NOT EXISTS subscriptions(followerId TEXT,followingId TEXT,ts TEXT,PRIMARY KEY(followerId,followingId));
+CREATE TABLE IF NOT EXISTS forum_posts(id TEXT PRIMARY KEY,authorId TEXT,title TEXT,text TEXT,category TEXT DEFAULT 'general',img TEXT,status TEXT DEFAULT 'open',pinned INTEGER DEFAULT 0,ts TEXT);
+CREATE TABLE IF NOT EXISTS forum_replies(id TEXT PRIMARY KEY,postId TEXT,authorId TEXT,text TEXT,img TEXT,ts TEXT);
+CREATE INDEX IF NOT EXISTS idx_fr ON forum_replies(postId);
+CREATE TABLE IF NOT EXISTS complaints(id TEXT PRIMARY KEY,authorId TEXT,text TEXT,img TEXT,type TEXT DEFAULT 'other',targetId TEXT,status TEXT DEFAULT 'pending',ts TEXT);
+CREATE TABLE IF NOT EXISTS complaint_replies(id TEXT PRIMARY KEY,complaintId TEXT,authorId TEXT,text TEXT,ts TEXT);
+`);
 
-// БД — 3 места одновременно
-const DATA_DIR = process.env.DATA_DIR || '/data';
-const DB_PATHS = [
-  path.join(DATA_DIR, 'knb_db.json'),
-  path.join(__dirname, 'knb_db.json'),
-  '/tmp/knb_db.json',
-];
-
-const app    = express();
-const server = http.createServer(app);
-const wss    = new WebSocketServer({ noServer: true });
-
-server.on('upgrade', (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
-});
-
-app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '20mb' }));
-app.use(express.static(path.join(__dirname)));
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-
-// ── БД ───────────────────────────────────────────
-let DB = {
-  users:[], posts:[], commPosts:[], communities:[],
-  commMembers:[], friendships:[], messages:[], groups:[],
-  verReqs:[], bans:[], notifications:[],
-  forumPosts:[], complaints:[]   // НОВОЕ
+const q={
+  uById:DB.prepare('SELECT * FROM users WHERE id=?'),
+  uByEmail:DB.prepare('SELECT * FROM users WHERE email=?'),
+  uByUname:DB.prepare('SELECT * FROM users WHERE username=?'),
+  allUsers:DB.prepare('SELECT * FROM users ORDER BY createdAt DESC'),
+  insUser:DB.prepare('INSERT INTO users VALUES(@id,@email,@password,@name,@username,@bio,@avatar,@banner,0,"user",@createdAt)'),
+  updUser:DB.prepare('UPDATE users SET name=@name,username=@username,bio=@bio,avatar=@avatar,banner=@banner WHERE id=@id'),
+  updPass:DB.prepare('UPDATE users SET password=@password WHERE id=@id'),
+  setVer:DB.prepare('UPDATE users SET verified=@v WHERE id=@id'),
+  setRole:DB.prepare('UPDATE users SET siteRole=@role WHERE id=@id'),
+  delUser:DB.prepare('DELETE FROM users WHERE id=?'),
+  activeBan:DB.prepare("SELECT * FROM bans WHERE uid=? AND(expiresAt IS NULL OR expiresAt>datetime('now'))"),
+  insBan:DB.prepare('INSERT INTO bans VALUES(@id,@uid,@reason,@bannedBy,@expiresAt,@ts)'),
+  delBan:DB.prepare('DELETE FROM bans WHERE uid=?'),
+  activeMute:DB.prepare("SELECT * FROM mutes WHERE uid=? AND(expiresAt IS NULL OR expiresAt>datetime('now'))"),
+  insMute:DB.prepare('INSERT INTO mutes VALUES(@id,@uid,@reason,@mutedBy,@expiresAt,@ts)'),
+  delMute:DB.prepare('DELETE FROM mutes WHERE uid=?'),
+  allPosts:DB.prepare('SELECT * FROM posts ORDER BY ts DESC'),
+  postById:DB.prepare('SELECT * FROM posts WHERE id=?'),
+  insPost:DB.prepare('INSERT INTO posts VALUES(@id,@authorId,@text,@mediaUrl,@mediaType,@communityId,@ts)'),
+  delPost:DB.prepare('DELETE FROM posts WHERE id=?'),
+  likes:DB.prepare('SELECT userId FROM post_likes WHERE postId=?'),
+  addLike:DB.prepare('INSERT OR IGNORE INTO post_likes VALUES(?,?)'),
+  delLike:DB.prepare('DELETE FROM post_likes WHERE postId=? AND userId=?'),
+  cmtsByPost:DB.prepare('SELECT * FROM comments WHERE postId=? ORDER BY ts ASC'),
+  insCmt:DB.prepare('INSERT INTO comments VALUES(@id,@postId,@uid,@text,@ts)'),
+  delCmt:DB.prepare('DELETE FROM comments WHERE id=?'),
+  cmtById:DB.prepare('SELECT * FROM comments WHERE id=?'),
+  allComms:DB.prepare('SELECT * FROM communities ORDER BY ts DESC'),
+  commById:DB.prepare('SELECT * FROM communities WHERE id=?'),
+  insComm:DB.prepare('INSERT INTO communities VALUES(@id,@name,@description,@avatar,@banner,0,@createdBy,@ts)'),
+  delComm:DB.prepare('DELETE FROM communities WHERE id=?'),
+  setCommVer:DB.prepare('UPDATE communities SET verified=@v WHERE id=@id'),
+  commMembers:DB.prepare('SELECT * FROM comm_members WHERE cid=?'),
+  memberRank:DB.prepare('SELECT rank FROM comm_members WHERE cid=? AND uid=?'),
+  insMember:DB.prepare('INSERT OR IGNORE INTO comm_members VALUES(?,?,"member",?)'),
+  delMember:DB.prepare('DELETE FROM comm_members WHERE cid=? AND uid=?'),
+  updRank:DB.prepare('UPDATE comm_members SET rank=? WHERE cid=? AND uid=?'),
+  friendsOf:DB.prepare('SELECT * FROM friendships WHERE fromId=? OR toId=?'),
+  friendById:DB.prepare('SELECT * FROM friendships WHERE id=?'),
+  insFriend:DB.prepare('INSERT INTO friendships VALUES(@id,@fromId,@toId,"pending",@ts)'),
+  acceptF:DB.prepare("UPDATE friendships SET status='accepted' WHERE id=?"),
+  delFriend:DB.prepare('DELETE FROM friendships WHERE id=?'),
+  msgByChat:DB.prepare('SELECT * FROM messages WHERE chatId=? ORDER BY ts ASC'),
+  insMsg:DB.prepare('INSERT INTO messages VALUES(@id,@chatId,@senderId,@text,@img,@voice,@ts)'),
+  delMsg:DB.prepare('DELETE FROM messages WHERE id=?'),
+  msgById:DB.prepare('SELECT * FROM messages WHERE id=?'),
+  groupsForUser:DB.prepare('SELECT g.* FROM groups g INNER JOIN group_members gm ON g.id=gm.groupId WHERE gm.userId=?'),
+  groupById:DB.prepare('SELECT * FROM groups WHERE id=?'),
+  insGroup:DB.prepare('INSERT INTO groups VALUES(@id,@name,@createdBy,@ts)'),
+  groupMembers:DB.prepare('SELECT userId FROM group_members WHERE groupId=?'),
+  addGM:DB.prepare('INSERT OR IGNORE INTO group_members VALUES(?,?)'),
+  notifs:DB.prepare('SELECT * FROM notifications WHERE uid=? ORDER BY ts DESC LIMIT 60'),
+  insNotif:DB.prepare('INSERT INTO notifications VALUES(@id,@uid,@text,0,@ts)'),
+  readNotifs:DB.prepare('UPDATE notifications SET read=1 WHERE uid=?'),
+  pendingVR:DB.prepare("SELECT * FROM ver_requests WHERE status='pending'"),
+  vrByUser:DB.prepare("SELECT * FROM ver_requests WHERE uid=? AND status='pending'"),
+  insVR:DB.prepare('INSERT INTO ver_requests VALUES(@id,@uid,"pending",@ts)'),
+  approveVR:DB.prepare("UPDATE ver_requests SET status='approved' WHERE id=?"),
+  delVR:DB.prepare('DELETE FROM ver_requests WHERE id=?'),
+  activeStories:DB.prepare("SELECT * FROM stories WHERE expiresAt>datetime('now') ORDER BY ts DESC"),
+  insStory:DB.prepare('INSERT INTO stories VALUES(@id,@authorId,@mediaUrl,@mediaType,@text,@ts,@expiresAt)'),
+  delStory:DB.prepare('DELETE FROM stories WHERE id=?'),
+  storyById:DB.prepare('SELECT * FROM stories WHERE id=?'),
+  viewStory:DB.prepare('INSERT OR IGNORE INTO story_views VALUES(?,?,?)'),
+  storyViews:DB.prepare('SELECT sv.userId,u.name,u.avatar FROM story_views sv LEFT JOIN users u ON u.id=sv.userId WHERE sv.storyId=?'),
+  likeStory:DB.prepare('INSERT OR IGNORE INTO story_likes VALUES(?,?)'),
+  unlikeStory:DB.prepare('DELETE FROM story_likes WHERE storyId=? AND userId=?'),
+  storyLikes:DB.prepare('SELECT userId FROM story_likes WHERE storyId=?'),
+  sub:DB.prepare('INSERT OR IGNORE INTO subscriptions VALUES(?,?,?)'),
+  unsub:DB.prepare('DELETE FROM subscriptions WHERE followerId=? AND followingId=?'),
+  followers:DB.prepare('SELECT followerId FROM subscriptions WHERE followingId=?'),
+  following:DB.prepare('SELECT followingId FROM subscriptions WHERE followerId=?'),
+  isFollowing:DB.prepare('SELECT 1 FROM subscriptions WHERE followerId=? AND followingId=?'),
+  allForum:DB.prepare('SELECT * FROM forum_posts ORDER BY pinned DESC,ts DESC'),
+  forumById:DB.prepare('SELECT * FROM forum_posts WHERE id=?'),
+  insForum:DB.prepare('INSERT INTO forum_posts VALUES(@id,@authorId,@title,@text,@category,@img,"open",0,@ts)'),
+  delForum:DB.prepare('DELETE FROM forum_posts WHERE id=?'),
+  forumStatus:DB.prepare('UPDATE forum_posts SET status=? WHERE id=?'),
+  forumPin:DB.prepare('UPDATE forum_posts SET pinned=? WHERE id=?'),
+  forumReplies:DB.prepare('SELECT * FROM forum_replies WHERE postId=? ORDER BY ts ASC'),
+  insForumReply:DB.prepare('INSERT INTO forum_replies VALUES(@id,@postId,@authorId,@text,@img,@ts)'),
+  delForumReply:DB.prepare('DELETE FROM forum_replies WHERE id=?'),
+  forumReplyById:DB.prepare('SELECT * FROM forum_replies WHERE id=?'),
+  allComplaints:DB.prepare('SELECT * FROM complaints ORDER BY ts DESC'),
+  myComplaints:DB.prepare('SELECT * FROM complaints WHERE authorId=? ORDER BY ts DESC'),
+  complaintById:DB.prepare('SELECT * FROM complaints WHERE id=?'),
+  insComplaint:DB.prepare('INSERT INTO complaints VALUES(@id,@authorId,@text,@img,@type,@targetId,"pending",@ts)'),
+  delComplaint:DB.prepare('DELETE FROM complaints WHERE id=?'),
+  complaintStatus:DB.prepare('UPDATE complaints SET status=? WHERE id=?'),
+  compReplies:DB.prepare('SELECT * FROM complaint_replies WHERE complaintId=? ORDER BY ts ASC'),
+  insCompReply:DB.prepare('INSERT INTO complaint_replies VALUES(@id,@complaintId,@authorId,@text,@ts)'),
 };
 
-async function loadDB() {
-  await fs.ensureDir(DATA_DIR).catch(()=>{});
-  await fs.ensureDir('/tmp').catch(()=>{});
-  for (const p of DB_PATHS) {
-    try {
-      if (await fs.pathExists(p)) {
-        const data = await fs.readJson(p);
-        if (!data || !data.users) continue;
-        if (data.commMembers) data.commMembers = data.commMembers.map(m=>({...m,rank:m.rank||'member'}));
-        if (!data.forumPosts)   data.forumPosts   = [];
-        if (!data.complaints)   data.complaints   = [];
-        DB = { ...DB, ...data };
-        console.log('[DB] loaded from', p, '| users:', DB.users.length);
-        return;
-      }
-    } catch(e) { console.error('[DB] error:', p, e.message); }
-  }
-  await saveNow();
-}
+const now=()=>new Date().toISOString(),uid=uuid;
+function safe(u){if(!u)return null;const{password,...s}=u;s.verified=!!s.verified;return s;}
+function ePost(p){return{...p,likes:q.likes.all(p.id).map(r=>r.userId),comments:q.cmtsByPost.all(p.id),media:p.mediaUrl?{url:p.mediaUrl,t:p.mediaType}:null};}
+function eForum(p){return{...p,pinned:!!p.pinned,author:safe(q.uById.get(p.authorId)),replies:q.forumReplies.all(p.id).map(r=>({...r,author:safe(q.uById.get(r.authorId))}))};}
+const isBanned=uid=>!!q.activeBan.get(uid);
+const isMuted=uid=>!!q.activeMute.get(uid);
+function isOwnerU(uid){const u=q.uById.get(uid);return u&&u.email===OWNER_EMAIL;}
+function isStaff(uid){const u=q.uById.get(uid);if(!u)return false;if(u.email===OWNER_EMAIL)return true;return['admin','moderator','helper'].includes(u.siteRole);}
+function canManage(uid){const u=q.uById.get(uid);if(!u)return false;if(u.email===OWNER_EMAIL)return true;return u.siteRole==='admin';}
 
-let _saveTimer = null;
-function saveDB() {
-  clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(saveNow, 500);
-}
-async function saveNow() {
-  clearTimeout(_saveTimer);
-  for (const p of DB_PATHS) {
-    try { await fs.ensureDir(path.dirname(p)).catch(()=>{}); await fs.writeJson(p, DB); } catch(e) {}
-  }
-}
-process.on('SIGTERM', async () => { await saveNow(); process.exit(0); });
-process.on('SIGINT',  async () => { await saveNow(); process.exit(0); });
+const app=express(),server=http.createServer(app),wss=new WebSocketServer({noServer:true});
+server.on('upgrade',(req,sock,head)=>wss.handleUpgrade(req,sock,head,ws=>wss.emit('connection',ws,req)));
+app.use(cors({origin:'*'}));app.use(express.json({limit:'20mb'}));
+app.use(express.static(path.join(__dirname)));
+app.get('/',(_,res)=>res.sendFile(path.join(__dirname,'index.html')));
 
-// ── Хелперы ──────────────────────────────────────
-const fu  = id => DB.users.find(u => u.id === id);
-const fc  = id => DB.communities.find(c => c.id === id);
-const isBanned = uid => DB.bans.some(b => b.uid === uid);
+const clients=new Map(),online=new Set(),callRooms=new Map(),peerRooms=new Map();
+function sendTo(uid,d){const m=JSON.stringify(d);clients.get(uid)?.forEach(ws=>{if(ws.readyState===WebSocket.OPEN)ws.send(m);});}
+function broadcast(d,ex){const m=JSON.stringify(d);clients.forEach((s,id)=>{if(id===ex)return;s.forEach(ws=>{if(ws.readyState===WebSocket.OPEN)ws.send(m);});});}
+function pushNotif(uid,text){const n={id:'n_'+uid(),uid,text,ts:now()};q.insNotif.run(n);sendTo(uid,{type:'notification',text,ts:n.ts});}
+function chatRecips(chatId,ex){
+  if(chatId.startsWith('g_'))return q.groupMembers.all(chatId).map(r=>r.userId).filter(id=>id!==ex);
+  if(chatId.startsWith('cc_'))return q.commMembers.all(chatId.replace('cc_','')).map(m=>m.uid).filter(id=>id!==ex);
+  return chatId.replace(/^chat_/,'').split('_').filter(id=>id!==ex&&!!q.uById.get(id));
+}
+function leaveRoom(uid,roomId){const r=callRooms.get(roomId);if(!r)return;r.delete(uid);if(!r.size)callRooms.delete(roomId);else r.forEach(p=>sendTo(p,{type:'call_room_peer_left',peerId:uid,roomId}));const pr=peerRooms.get(uid);if(pr){pr.delete(roomId);if(!pr.size)peerRooms.delete(uid);}}
 
-// Роли на сайте: owner > admin > moderator > helper > user
-const SITE_ROLES = ['owner','admin','moderator','helper','user'];
-function getSiteRole(uid) {
-  const u = fu(uid);
-  if (!u) return 'user';
-  if (u.email === OWNER_EMAIL) return 'owner';
-  return u.siteRole || 'user';
-}
-function hasStaffRole(uid) { return ['owner','admin','moderator','helper'].includes(getSiteRole(uid)); }
-function canManageSite(uid) { return ['owner','admin'].includes(getSiteRole(uid)); }
-
-// Ранги сообществ
-const RANK_POST   = new Set(['owner','admin','moderator']);
-const RANK_MANAGE = new Set(['owner','admin']);
-function getMemberRank(cid, uid) {
-  if (fc(cid)?.createdBy === uid) return 'owner';
-  return DB.commMembers.find(x => x.cid===cid && x.uid===uid)?.rank || null;
-}
-function canPostComm(cid, uid)   { return fu(uid)?.email===OWNER_EMAIL || (getMemberRank(cid,uid) && RANK_POST.has(getMemberRank(cid,uid))); }
-function canManageComm(cid, uid) { return fu(uid)?.email===OWNER_EMAIL || (getMemberRank(cid,uid) && RANK_MANAGE.has(getMemberRank(cid,uid))); }
-
-// WS
-const clients   = new Map();
-const onlineSet = new Set();
-function sendTo(uid, data) {
-  const msg = JSON.stringify(data);
-  clients.get(uid)?.forEach(ws => { if (ws.readyState===WebSocket.OPEN) ws.send(msg); });
-}
-function broadcast(data, exceptUid) {
-  const msg = JSON.stringify(data);
-  clients.forEach((set,uid) => { if(uid===exceptUid) return; set.forEach(ws=>{ if(ws.readyState===WebSocket.OPEN) ws.send(msg); }); });
-}
-function chatRecipients(chatId, exceptUid) {
-  if (chatId.startsWith('g_'))  return (DB.groups.find(x=>x.id===chatId)?.members||[]).filter(id=>id!==exceptUid);
-  if (chatId.startsWith('cc_')) return DB.commMembers.filter(m=>m.cid===chatId.replace('cc_','')).map(m=>m.uid).filter(id=>id!==exceptUid);
-  return chatId.replace(/^chat_/,'').split('_').filter(id=>id!==exceptUid&&!!fu(id));
-}
-function pushNotif(uid, text) {
-  const n = { id:'n_'+uuid(), uid, text, read:false, ts:new Date().toISOString() };
-  DB.notifications.push(n); saveDB();
-  sendTo(uid, { type:'notification', text, ts:n.ts });
-}
-
-// Auth
-function auth(req,res,next) {
-  const t=(req.headers.authorization||'').split(' ')[1];
-  if(!t) return res.status(401).json({error:'Нет токена'});
-  try { req.user=jwt.verify(t,JWT_SECRET); next(); }
-  catch { res.status(401).json({error:'Токен недействителен'}); }
-}
-function ownerOnly(req,res,next) {
-  if(fu(req.user.id)?.email!==OWNER_EMAIL) return res.status(403).json({error:'Только для владельца'});
-  next();
-}
-function staffOnly(req,res,next) {
-  if(!hasStaffRole(req.user.id)) return res.status(403).json({error:'Только для персонала'});
-  next();
-}
-
-// WS
-wss.on('connection', ws => {
-  ws.uid = null;
-  ws.on('message', raw => {
-    let m; try{m=JSON.parse(raw);}catch{return;}
-    if (m.type==='auth') {
-      try {
-        const d=jwt.verify(m.token,JWT_SECRET);
-        ws.uid=d.id;
-        if(!clients.has(ws.uid)) clients.set(ws.uid,new Set());
-        clients.get(ws.uid).add(ws);
-        onlineSet.add(ws.uid);
-        ws.send(JSON.stringify({type:'authed',userId:ws.uid}));
-        ws.send(JSON.stringify({type:'online_list',users:[...onlineSet]}));
-        broadcast({type:'user_online',uid:ws.uid},ws.uid);
-      } catch { ws.send(JSON.stringify({type:'auth_error'})); }
-      return;
-    }
-    if(!ws.uid) return;
-    if(m.type==='call_offer')  { const c=fu(ws.uid); sendTo(m.to,{type:'call_incoming',from:ws.uid,callerName:c?.name,callerAva:c?.avatar,offer:m.offer,callType:m.callType}); }
-    if(m.type==='call_answer') sendTo(m.to,{type:'call_answer',answer:m.answer,from:ws.uid});
-    if(m.type==='call_ice')    sendTo(m.to,{type:'call_ice',candidate:m.candidate,from:ws.uid});
-    if(m.type==='call_reject') sendTo(m.to,{type:'call_rejected',from:ws.uid});
-    if(m.type==='call_end')    sendTo(m.to,{type:'call_ended',from:ws.uid});
-    if(m.type==='typing')      chatRecipients(m.chatId,ws.uid).forEach(uid=>sendTo(uid,{type:'typing',chatId:m.chatId,name:fu(ws.uid)?.name}));
+wss.on('connection',ws=>{
+  ws.uid=null;
+  ws.on('message',raw=>{
+    let m;try{m=JSON.parse(raw);}catch{return;}
+    if(m.type==='auth'){try{const d=jwt.verify(m.token,JWT_SECRET);ws.uid=d.id;if(!clients.has(ws.uid))clients.set(ws.uid,new Set());clients.get(ws.uid).add(ws);online.add(ws.uid);ws.send(JSON.stringify({type:'authed',userId:ws.uid}));ws.send(JSON.stringify({type:'online_list',users:[...online]}));broadcast({type:'user_online',uid:ws.uid},ws.uid);}catch{ws.send(JSON.stringify({type:'auth_error'}));}return;}
+    if(!ws.uid)return;
+    if(m.type==='call_offer'){const c=q.uById.get(ws.uid);sendTo(m.to,{type:'call_incoming',from:ws.uid,callerName:c?.name,callerAva:c?.avatar,offer:m.offer,callType:m.callType});}
+    if(m.type==='call_answer')sendTo(m.to,{type:'call_answer',answer:m.answer,from:ws.uid});
+    if(m.type==='call_ice')sendTo(m.to,{type:'call_ice',candidate:m.candidate,from:ws.uid});
+    if(m.type==='call_reject')sendTo(m.to,{type:'call_rejected',from:ws.uid});
+    if(m.type==='call_end')sendTo(m.to,{type:'call_ended',from:ws.uid});
+    if(m.type==='typing')chatRecips(m.chatId,ws.uid).forEach(id=>sendTo(id,{type:'typing',chatId:m.chatId,name:q.uById.get(ws.uid)?.name}));
+    if(m.type==='call_room_join'){const{roomId}=m;if(!callRooms.has(roomId))callRooms.set(roomId,new Set());const r=callRooms.get(roomId);const peers=[...r].filter(id=>id!==ws.uid);sendTo(ws.uid,{type:'call_room_peers',peers,roomId});peers.forEach(id=>sendTo(id,{type:'call_room_peer_joined',peerId:ws.uid,roomId}));r.add(ws.uid);if(!peerRooms.has(ws.uid))peerRooms.set(ws.uid,new Set());peerRooms.get(ws.uid).add(roomId);}
+    if(m.type==='call_room_leave')leaveRoom(ws.uid,m.roomId);
+    if(m.type==='call_room_signal')sendTo(m.to,{type:'call_room_signal',from:ws.uid,roomId:m.roomId,signal:m.signal});
   });
-  ws.on('close',()=>{
-    if(ws.uid&&clients.has(ws.uid)){
-      clients.get(ws.uid).delete(ws);
-      if(!clients.get(ws.uid).size){
-        clients.delete(ws.uid); onlineSet.delete(ws.uid);
-        broadcast({type:'user_offline',uid:ws.uid},ws.uid);
-      }
-    }
-  });
+  ws.on('close',()=>{if(ws.uid&&clients.has(ws.uid)){clients.get(ws.uid).delete(ws);if(!clients.get(ws.uid).size){clients.delete(ws.uid);online.delete(ws.uid);broadcast({type:'user_offline',uid:ws.uid},ws.uid);const r=peerRooms.get(ws.uid);if(r)[...r].forEach(rId=>leaveRoom(ws.uid,rId));}}});
   ws.on('error',()=>{});
 });
 
-// ═══════════════════════════════════════════════
-//  ROUTES
-// ═══════════════════════════════════════════════
+const auth=(req,res,next)=>{const t=(req.headers.authorization||'').split(' ')[1];if(!t)return res.status(401).json({error:'No token'});try{req.user=jwt.verify(t,JWT_SECRET);next();}catch{res.status(401).json({error:'Invalid token'});}};
+const ownerOnly=(req,res,next)=>{if(!isOwnerU(req.user.id))return res.status(403).json({error:'Owner only'});next();};
+const staffOnly=(req,res,next)=>{if(!isStaff(req.user.id))return res.status(403).json({error:'Staff only'});next();};
 
-// Auth
-app.post('/api/auth/register', async(req,res)=>{
-  try {
-    let{email,password,name,username,bio,avatar}=req.body;
-    if(!email||!password||!name||!username) return res.status(400).json({error:'Заполните все поля'});
-    email=email.trim().toLowerCase();
-    if(DB.users.find(u=>u.email===email)) return res.status(400).json({error:'Email уже занят'});
-    const uname=username.trim().startsWith('@')?username.trim():'@'+username.trim();
-    if(DB.users.find(u=>u.username===uname)) return res.status(400).json({error:'Username занят'});
-    const hash=await bcrypt.hash(password,10);
-    const user={id:'u_'+uuid(),email,password:hash,name:name.trim(),username:uname,bio:bio||'',avatar:avatar||'',banner:'',verified:false,siteRole:'user',friends:[],createdAt:new Date().toISOString()};
-    DB.users.push(user); saveDB();
-    const token=jwt.sign({id:user.id},JWT_SECRET,{expiresIn:'30d'});
-    const{password:_,...safe}=user; res.json({token,user:safe});
-  } catch(e){res.status(500).json({error:e.message});}
-});
+// AUTH
+app.post('/api/auth/register',async(req,res)=>{try{let{email,password,name,username,bio,avatar}=req.body;if(!email||!password||!name||!username)return res.status(400).json({error:'Fill all fields'});email=email.trim().toLowerCase();if(q.uByEmail.get(email))return res.status(400).json({error:'Email taken'});const un=username.trim().startsWith('@')?username.trim():'@'+username.trim();if(q.uByUname.get(un))return res.status(400).json({error:'Username taken'});const hash=await bcrypt.hash(password,10);const u={id:'u_'+uid(),email,password:hash,name:name.trim(),username:un,bio:bio||'',avatar:avatar||'',banner:'',createdAt:now()};q.insUser.run(u);const token=jwt.sign({id:u.id},JWT_SECRET,{expiresIn:'30d'});res.json({token,user:safe(q.uById.get(u.id))});}catch(e){res.status(500).json({error:e.message});}});
+app.post('/api/auth/login',async(req,res)=>{try{let{id:lid,password}=req.body;if(!lid||!password)return res.status(400).json({error:'Fill fields'});lid=lid.trim();const u=q.uByEmail.get(lid.toLowerCase())||q.uByUname.get(lid.startsWith('@')?lid:'@'+lid);if(!u)return res.status(401).json({error:'User not found'});if(!(await bcrypt.compare(password,u.password)))return res.status(401).json({error:'Wrong password'});if(isBanned(u.id)){const b=q.activeBan.get(u.id);return res.status(403).json({error:`Banned. Reason: ${b.reason||'none'}`});}const token=jwt.sign({id:u.id},JWT_SECRET,{expiresIn:'30d'});res.json({token,user:safe(u)});}catch(e){res.status(500).json({error:e.message});}});
 
-app.post('/api/auth/login', async(req,res)=>{
-  try {
-    let{id:loginId,password}=req.body;
-    if(!loginId||!password) return res.status(400).json({error:'Заполните все поля'});
-    loginId=loginId.trim();
-    const user=DB.users.find(u=>u.email===loginId.toLowerCase())||DB.users.find(u=>u.username===(loginId.startsWith('@')?loginId:'@'+loginId));
-    if(!user)                                        return res.status(401).json({error:'Пользователь не найден'});
-    if(!(await bcrypt.compare(password,user.password))) return res.status(401).json({error:'Неверный пароль'});
-    if(isBanned(user.id))                            return res.status(403).json({error:'Аккаунт заблокирован'});
-    const token=jwt.sign({id:user.id},JWT_SECRET,{expiresIn:'30d'});
-    const{password:_,...safe}=user; res.json({token,user:safe});
-  } catch(e){res.status(500).json({error:e.message});}
-});
+// USERS
+app.get('/api/users',auth,(req,res)=>res.json(q.allUsers.all().map(u=>({...safe(u),followersCount:q.followers.all(u.id).length,followingCount:q.following.all(u.id).length,isFollowing:!!q.isFollowing.get(req.user.id,u.id),isBanned:isBanned(u.id),isMuted:isMuted(u.id)}))));
+app.put('/api/users/:id',auth,async(req,res)=>{if(req.user.id!==req.params.id)return res.status(403).json({error:'Forbidden'});const u=q.uById.get(req.params.id);if(!u)return res.status(404).json({error:'Not found'});const{name,username,bio,avatar,banner,password}=req.body;const un=username?(username.trim().startsWith('@')?username.trim():'@'+username.trim()):u.username;if(un!==u.username&&q.uByUname.get(un)?.id!==u.id)return res.status(400).json({error:'Username taken'});q.updUser.run({name:(name||u.name).trim(),username:un,bio:bio!==undefined?bio:u.bio,avatar:avatar!==undefined?avatar:u.avatar,banner:banner!==undefined?banner:u.banner,id:u.id});if(password)q.updPass.run({password:await bcrypt.hash(password,10),id:u.id});res.json(safe(q.uById.get(u.id)));});
 
-// Users
-app.get('/api/users',auth,(_,res)=>res.json(DB.users.map(({password,...u})=>u)));
-app.put('/api/users/:id',auth,async(req,res)=>{
-  if(req.user.id!==req.params.id) return res.status(403).json({error:'Forbidden'});
-  const user=fu(req.params.id); if(!user) return res.status(404).json({error:'Not found'});
-  const{name,username,bio,avatar,banner,password}=req.body;
-  if(name) user.name=name.trim();
-  if(bio!==undefined) user.bio=bio;
-  if(avatar) user.avatar=avatar;
-  if(banner) user.banner=banner;
-  if(username){const uname=username.trim().startsWith('@')?username.trim():'@'+username.trim();if(DB.users.some(u=>u.username===uname&&u.id!==user.id))return res.status(400).json({error:'Username занят'});user.username=uname;}
-  if(password) user.password=await bcrypt.hash(password,10);
-  saveDB(); const{password:_,...safe}=user; res.json(safe);
-});
+// SUBS
+app.post('/api/users/:id/follow',auth,(req,res)=>{const t=req.params.id;if(t===req.user.id)return res.status(400).json({error:'Cannot follow self'});if(q.isFollowing.get(req.user.id,t)){q.unsub.run(req.user.id,t);return res.json({following:false});}q.sub.run(req.user.id,t,now());pushNotif(t,`👤 ${q.uById.get(req.user.id)?.name} subscribed`);res.json({following:true});});
+app.get('/api/users/:id/followers',auth,(req,res)=>res.json(q.followers.all(req.params.id).map(r=>safe(q.uById.get(r.followerId))).filter(Boolean)));
+app.get('/api/users/:id/following',auth,(req,res)=>res.json(q.following.all(req.params.id).map(r=>safe(q.uById.get(r.followingId))).filter(Boolean)));
 
-// Posts
-app.get('/api/posts',auth,(_,res)=>res.json([...DB.posts,...DB.commPosts].sort((a,b)=>new Date(b.ts)-new Date(a.ts))));
-app.post('/api/posts',auth,async(req,res)=>{
-  const{text,media,communityId}=req.body;
-  if(!text&&!media) return res.status(400).json({error:'Пустой пост'});
-  if(communityId&&!canPostComm(communityId,req.user.id)) return res.status(403).json({error:'Нет прав'});
-  const post={id:'p_'+uuid(),authorId:req.user.id,text:text||'',media:media||null,likes:[],comments:[],ts:new Date().toISOString()};
-  if(communityId){post.communityId=communityId;DB.commPosts.push(post);}else DB.posts.push(post);
-  saveDB(); broadcast({type:'new_post',post},req.user.id); res.json(post);
-});
-app.post('/api/posts/:id/like',auth,async(req,res)=>{
-  const post=[...DB.posts,...DB.commPosts].find(p=>p.id===req.params.id);
-  if(!post) return res.status(404).json({error:'Not found'});
-  if(!post.likes) post.likes=[];
-  const idx=post.likes.indexOf(req.user.id);
-  if(idx>=0) post.likes.splice(idx,1);
-  else{post.likes.push(req.user.id);if(post.authorId!==req.user.id)pushNotif(post.authorId,`❤️ ${fu(req.user.id)?.name||'?'} лайкнул ваш пост`);}
-  saveDB(); res.json(post);
-});
-app.post('/api/posts/:id/comment',auth,async(req,res)=>{
-  const post=[...DB.posts,...DB.commPosts].find(p=>p.id===req.params.id);
-  if(!post) return res.status(404).json({error:'Not found'});
-  if(!req.body.text?.trim()) return res.status(400).json({error:'Пустой комментарий'});
-  if(!post.comments) post.comments=[];
-  const cmt={id:'c_'+uuid(),uid:req.user.id,text:req.body.text.trim(),ts:new Date().toISOString()};
-  post.comments.push(cmt);
-  if(post.authorId!==req.user.id) pushNotif(post.authorId,`💬 ${fu(req.user.id)?.name||'?'} прокомментировал ваш пост`);
-  saveDB(); res.json(post);
-});
-app.delete('/api/posts/:pid/comment/:cid',auth,async(req,res)=>{
-  const post=[...DB.posts,...DB.commPosts].find(p=>p.id===req.params.pid);
-  if(!post) return res.status(404).json({error:'Not found'});
-  const isAdmin=canManageSite(req.user.id);
-  const idx=(post.comments||[]).findIndex(c=>c.id===req.params.cid&&(c.uid===req.user.id||isAdmin||post.authorId===req.user.id));
-  if(idx<0) return res.status(403).json({error:'Forbidden'});
-  post.comments.splice(idx,1); saveDB(); res.json(post);
-});
-app.delete('/api/posts/:id',auth,async(req,res)=>{
-  const isAdmin=canManageSite(req.user.id);
-  const pi=DB.posts.findIndex(p=>p.id===req.params.id&&(p.authorId===req.user.id||isAdmin));
-  const ci=DB.commPosts.findIndex(p=>p.id===req.params.id&&(p.authorId===req.user.id||isAdmin));
-  if(pi>=0) DB.posts.splice(pi,1); else if(ci>=0) DB.commPosts.splice(ci,1); else return res.status(403).json({error:'Forbidden'});
-  saveDB(); res.json({ok:true});
-});
+// STORIES
+app.get('/api/stories',auth,(req,res)=>res.json(q.activeStories.all().map(s=>({...s,author:safe(q.uById.get(s.authorId)),viewCount:q.storyViews.all(s.id).length,likeCount:q.storyLikes.all(s.id).length,liked:!!q.storyLikes.all(s.id).find(r=>r.userId===req.user.id),viewed:!!q.storyViews.all(s.id).find(r=>r.userId===req.user.id)}))));
+app.post('/api/stories',auth,(req,res)=>{if(isMuted(req.user.id))return res.status(403).json({error:'Muted'});const{mediaUrl,mediaType,text}=req.body;if(!mediaUrl)return res.status(400).json({error:'Media required'});const s={id:'s_'+uid(),authorId:req.user.id,mediaUrl,mediaType:mediaType||'image',text:text||'',ts:now(),expiresAt:new Date(Date.now()+86400000).toISOString()};q.insStory.run(s);res.json(s);});
+app.delete('/api/stories/:id',auth,(req,res)=>{const s=q.storyById.get(req.params.id);if(!s)return res.status(404).json({error:'NF'});if(s.authorId!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});q.delStory.run(req.params.id);res.json({ok:true});});
+app.post('/api/stories/:id/view',auth,(req,res)=>{q.viewStory.run(req.params.id,req.user.id,now());res.json({ok:true});});
+app.post('/api/stories/:id/like',auth,(req,res)=>{const liked=q.storyLikes.all(req.params.id).find(r=>r.userId===req.user.id);if(liked){q.unlikeStory.run(req.params.id,req.user.id);return res.json({liked:false});}q.likeStory.run(req.params.id,req.user.id);const s=q.storyById.get(req.params.id);if(s&&s.authorId!==req.user.id)pushNotif(s.authorId,`❤️ ${q.uById.get(req.user.id)?.name} liked your story`);res.json({liked:true});});
+app.get('/api/stories/:id/stats',auth,(req,res)=>{const s=q.storyById.get(req.params.id);if(!s)return res.status(404).json({error:'NF'});if(s.authorId!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});res.json({views:q.storyViews.all(req.params.id),likes:q.storyLikes.all(req.params.id).map(r=>safe(q.uById.get(r.userId))).filter(Boolean)});});
 
-// Friendships
-app.get('/api/friendships',auth,(req,res)=>res.json(DB.friendships.filter(f=>f.from===req.user.id||f.to===req.user.id)));
-app.post('/api/friendships',auth,async(req,res)=>{
-  const{to}=req.body; if(!to||to===req.user.id) return res.status(400).json({error:'Неверный запрос'});
-  if(DB.friendships.find(f=>f.from===req.user.id&&f.to===to)) return res.status(400).json({error:'Заявка уже отправлена'});
-  const f={id:'f_'+uuid(),from:req.user.id,to,status:'pending',ts:new Date().toISOString()};
-  DB.friendships.push(f);
-  const sender=fu(req.user.id);
-  pushNotif(to,`👤 ${sender?.name||'?'} хочет добавить вас в друзья`);
-  sendTo(to,{type:'friend_request',friendship:f,senderName:sender?.name});
-  saveDB(); res.json(f);
-});
-app.put('/api/friendships/:id/accept',auth,async(req,res)=>{
-  const f=DB.friendships.find(x=>x.id===req.params.id&&x.to===req.user.id);
-  if(!f) return res.status(404).json({error:'Not found'});
-  f.status='accepted';
-  const from=fu(f.from),to=fu(f.to);
-  if(from){if(!from.friends)from.friends=[];if(!from.friends.includes(f.to))from.friends.push(f.to);}
-  if(to){if(!to.friends)to.friends=[];if(!to.friends.includes(f.from))to.friends.push(f.from);}
-  pushNotif(f.from,`✅ ${to?.name||'?'} принял вашу заявку в друзья`);
-  sendTo(f.from,{type:'friend_accepted',byName:to?.name});
-  saveDB(); res.json(f);
-});
-app.delete('/api/friendships/:id',auth,async(req,res)=>{
-  const idx=DB.friendships.findIndex(f=>f.id===req.params.id&&(f.from===req.user.id||f.to===req.user.id));
-  if(idx<0) return res.status(404).json({error:'Not found'});
-  const f=DB.friendships.splice(idx,1)[0];
-  const u1=fu(f.from),u2=fu(f.to);
-  if(u1)u1.friends=(u1.friends||[]).filter(id=>id!==f.to);
-  if(u2)u2.friends=(u2.friends||[]).filter(id=>id!==f.from);
-  saveDB(); res.json({ok:true});
-});
+// POSTS
+app.get('/api/posts',auth,(_,res)=>res.json(q.allPosts.all().map(ePost)));
+app.post('/api/posts',auth,(req,res)=>{if(isMuted(req.user.id))return res.status(403).json({error:'Muted'});const{text,media,communityId}=req.body;if(!text&&!media)return res.status(400).json({error:'Empty post'});const p={id:'p_'+uid(),authorId:req.user.id,text:text||'',mediaUrl:media?.url||null,mediaType:media?.t||null,communityId:communityId||null,ts:now()};q.insPost.run(p);const ep=ePost(p);broadcast({type:'new_post',post:ep},req.user.id);res.json(ep);});
+app.post('/api/posts/:id/like',auth,(req,res)=>{const p=q.postById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});if(q.likes.all(p.id).find(r=>r.userId===req.user.id))q.delLike.run(p.id,req.user.id);else{q.addLike.run(p.id,req.user.id);if(p.authorId!==req.user.id)pushNotif(p.authorId,`❤️ ${q.uById.get(req.user.id)?.name} liked your post`);}res.json(ePost(p));});
+app.post('/api/posts/:id/comment',auth,(req,res)=>{if(isMuted(req.user.id))return res.status(403).json({error:'Muted'});const p=q.postById.get(req.params.id);if(!p||!req.body.text?.trim())return res.status(400).json({error:'Error'});const c={id:'c_'+uid(),postId:p.id,uid:req.user.id,text:req.body.text.trim(),ts:now()};q.insCmt.run(c);if(p.authorId!==req.user.id)pushNotif(p.authorId,`💬 ${q.uById.get(req.user.id)?.name} commented`);res.json(ePost(p));});
+app.delete('/api/posts/:pid/comment/:cid',auth,(req,res)=>{const c=q.cmtById.get(req.params.cid);if(!c)return res.status(404).json({error:'NF'});const p=q.postById.get(req.params.pid);if(c.uid!==req.user.id&&!canManage(req.user.id)&&p?.authorId!==req.user.id)return res.status(403).json({error:'Forbidden'});q.delCmt.run(req.params.cid);res.json(p?ePost(p):{ok:true});});
+app.delete('/api/posts/:id',auth,(req,res)=>{const p=q.postById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});if(p.authorId!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});q.delPost.run(req.params.id);res.json({ok:true});});
 
-// Messages
-app.get('/api/messages',auth,(req,res)=>{
-  const{chatId}=req.query; if(!chatId) return res.status(400).json({error:'chatId required'});
-  res.json(DB.messages.filter(m=>m.chatId===chatId).sort((a,b)=>new Date(a.ts)-new Date(b.ts)));
-});
-app.post('/api/messages',auth,async(req,res)=>{
-  const{chatId,text,img,voice}=req.body;
-  if(!chatId) return res.status(400).json({error:'chatId required'});
-  if(!text&&!img&&!voice) return res.status(400).json({error:'Пустое сообщение'});
-  if(chatId.startsWith('cc_')&&!canPostComm(chatId.replace('cc_',''),req.user.id)) return res.status(403).json({error:'Нет прав'});
-  const msg={id:'m_'+uuid(),chatId,senderId:req.user.id,text:text||null,img:img||null,voice:voice||null,ts:new Date().toISOString()};
-  DB.messages.push(msg); saveDB();
-  const recips=chatRecipients(chatId,req.user.id);
-  recips.forEach(uid=>sendTo(uid,{type:'new_message',message:msg}));
-  if(!chatId.startsWith('g_')&&!chatId.startsWith('cc_')){
-    const sender=fu(req.user.id);
-    recips.forEach(uid=>pushNotif(uid,`💌 ${sender?.name||'?'} написал вам сообщение`));
-  }
-  res.json(msg);
-});
-app.delete('/api/messages/:id',auth,async(req,res)=>{
-  const idx=DB.messages.findIndex(m=>m.id===req.params.id&&m.senderId===req.user.id);
-  if(idx>=0){DB.messages.splice(idx,1);saveDB();return res.json({ok:true});}
-  const msg=DB.messages.find(m=>m.id===req.params.id);
-  if(!msg) return res.status(404).json({error:'Not found'});
-  if(!canManageSite(req.user.id)) return res.status(403).json({error:'Forbidden'});
-  DB.messages.splice(DB.messages.indexOf(msg),1); saveDB(); res.json({ok:true});
-});
+// FRIENDS
+app.get('/api/friendships',auth,(req,res)=>res.json(q.friendsOf.all(req.user.id,req.user.id)));
+app.post('/api/friendships',auth,(req,res)=>{const{to}=req.body;if(!to||to===req.user.id)return res.status(400).json({error:'Error'});const f={id:'f_'+uid(),fromId:req.user.id,toId:to,ts:now()};q.insFriend.run(f);pushNotif(to,`👤 ${q.uById.get(req.user.id)?.name} wants to be friends`);sendTo(to,{type:'friend_request',friendship:f,senderName:q.uById.get(req.user.id)?.name});res.json(f);});
+app.put('/api/friendships/:id/accept',auth,(req,res)=>{const f=q.friendById.get(req.params.id);if(!f||f.toId!==req.user.id)return res.status(404).json({error:'NF'});q.acceptF.run(f.id);const to=q.uById.get(f.toId);pushNotif(f.fromId,`✅ ${to?.name} accepted`);sendTo(f.fromId,{type:'friend_accepted',byName:to?.name});res.json(q.friendById.get(f.id));});
+app.delete('/api/friendships/:id',auth,(req,res)=>{const f=q.friendById.get(req.params.id);if(!f||(f.fromId!==req.user.id&&f.toId!==req.user.id))return res.status(404).json({error:'NF'});q.delFriend.run(f.id);res.json({ok:true});});
 
-// Communities
-app.get('/api/communities',auth,(_,res)=>res.json(DB.communities));
-app.post('/api/communities',auth,async(req,res)=>{
-  const{name,description,avatar}=req.body;
-  if(!name?.trim()) return res.status(400).json({error:'Название обязательно'});
-  const comm={id:'c_'+uuid(),name:name.trim(),description:description||'',avatar:avatar||'',banner:'',verified:false,createdBy:req.user.id,ts:new Date().toISOString()};
-  DB.communities.push(comm);
-  DB.commMembers.push({uid:req.user.id,cid:comm.id,rank:'owner',ts:new Date().toISOString()});
-  saveDB(); res.json(comm);
-});
-app.get('/api/communities/:id/members',auth,(req,res)=>{
-  const cid=req.params.id,comm=fc(cid);
-  res.json(DB.commMembers.filter(m=>m.cid===cid).map(m=>({uid:m.uid,rank:comm?.createdBy===m.uid?'owner':(m.rank||'member'),ts:m.ts})));
-});
-app.post('/api/communities/:id/join',auth,async(req,res)=>{
-  const cid=req.params.id; if(!fc(cid)) return res.status(404).json({error:'Not found'});
-  if(!DB.commMembers.find(m=>m.cid===cid&&m.uid===req.user.id)) DB.commMembers.push({uid:req.user.id,cid,rank:'member',ts:new Date().toISOString()});
-  saveDB(); res.json({ok:true});
-});
-app.post('/api/communities/:id/leave',auth,async(req,res)=>{
-  const cid=req.params.id;
-  if(fc(cid)?.createdBy===req.user.id) return res.status(400).json({error:'Создатель не может покинуть'});
-  DB.commMembers=DB.commMembers.filter(m=>!(m.cid===cid&&m.uid===req.user.id));
-  saveDB(); res.json({ok:true});
-});
-app.post('/api/communities/:id/rank',auth,async(req,res)=>{
-  const cid=req.params.id; const{userId,rank}=req.body;
-  if(!['admin','moderator','member'].includes(rank)) return res.status(400).json({error:'Неверный ранг'});
-  if(!canManageComm(cid,req.user.id)) return res.status(403).json({error:'Нет прав'});
-  const comm=fc(cid); if(!comm) return res.status(404).json({error:'Not found'});
-  if(comm.createdBy===userId) return res.status(400).json({error:'Нельзя изменить ранг создателя'});
-  const m=DB.commMembers.find(x=>x.cid===cid&&x.uid===userId);
-  if(!m) return res.status(404).json({error:'Участник не найден'});
-  m.rank=rank; saveDB();
-  const names={admin:'Админ',moderator:'Модератор',member:'Участник'};
-  pushNotif(userId,`⚡ ${fu(req.user.id)?.name||'?'} назначил вам ранг "${names[rank]}" в "${comm.name}"`);
-  res.json({ok:true});
-});
+// MESSAGES
+app.get('/api/messages',auth,(req,res)=>{const{chatId}=req.query;if(!chatId)return res.status(400).json({error:'chatId req'});res.json(q.msgByChat.all(chatId));});
+app.post('/api/messages',auth,(req,res)=>{if(isMuted(req.user.id))return res.status(403).json({error:'Muted'});const{chatId,text,img,voice}=req.body;if(!chatId||(!text&&!img&&!voice))return res.status(400).json({error:'Empty'});const m={id:'m_'+uid(),chatId,senderId:req.user.id,text:text||null,img:img||null,voice:voice||null,ts:now()};q.insMsg.run(m);chatRecips(chatId,req.user.id).forEach(id=>{sendTo(id,{type:'new_message',message:m});if(!chatId.startsWith('g_')&&!chatId.startsWith('cc_'))pushNotif(id,`💌 ${q.uById.get(req.user.id)?.name} sent a message`);});res.json(m);});
+app.delete('/api/messages/:id',auth,(req,res)=>{const m=q.msgById.get(req.params.id);if(!m||(m.senderId!==req.user.id&&!canManage(req.user.id)))return res.status(403).json({error:'Forbidden'});q.delMsg.run(req.params.id);res.json({ok:true});});
 
-// Groups
-app.get('/api/groups',auth,(req,res)=>res.json(DB.groups.filter(g=>(g.members||[]).includes(req.user.id))));
-app.post('/api/groups',auth,async(req,res)=>{
-  const{name}=req.body; if(!name?.trim()) return res.status(400).json({error:'Название обязательно'});
-  const g={id:'g_'+uuid(),name:name.trim(),members:[req.user.id],createdBy:req.user.id,ts:new Date().toISOString()};
-  DB.groups.push(g); saveDB(); res.json(g);
-});
-app.post('/api/groups/:id/add',auth,async(req,res)=>{
-  const g=DB.groups.find(x=>x.id===req.params.id); if(!g) return res.status(404).json({error:'Not found'});
-  if(g.createdBy!==req.user.id) return res.status(403).json({error:'Только создатель'});
-  if(!g.members.includes(req.body.userId)) g.members.push(req.body.userId);
-  saveDB(); res.json(g);
-});
+// COMMUNITIES
+app.get('/api/communities',auth,(_,res)=>res.json(q.allComms.all().map(c=>({...c,verified:!!c.verified}))));
+app.post('/api/communities',auth,(req,res)=>{const{name,description,avatar}=req.body;if(!name?.trim())return res.status(400).json({error:'Name required'});const c={id:'c_'+uid(),name:name.trim(),description:description||'',avatar:avatar||'',banner:'',createdBy:req.user.id,ts:now()};q.insComm.run(c);q.insMember.run(c.id,req.user.id,now());q.updRank.run('owner',c.id,req.user.id);res.json({...c,verified:false});});
+app.get('/api/communities/:id/members',auth,(req,res)=>{const c=q.commById.get(req.params.id);res.json(q.commMembers.all(req.params.id).map(m=>({uid:m.uid,rank:c?.createdBy===m.uid?'owner':(m.rank||'member'),ts:m.ts})));});
+app.post('/api/communities/:id/join',auth,(req,res)=>{q.insMember.run(req.params.id,req.user.id,now());res.json({ok:true});});
+app.post('/api/communities/:id/leave',auth,(req,res)=>{const c=q.commById.get(req.params.id);if(c?.createdBy===req.user.id)return res.status(400).json({error:'Owner cannot leave'});q.delMember.run(req.params.id,req.user.id);res.json({ok:true});});
+app.post('/api/communities/:id/rank',auth,(req,res)=>{const{userId,rank}=req.body;if(!['admin','moderator','member'].includes(rank))return res.status(400).json({error:'Invalid rank'});const myR=q.commById.get(req.params.id)?.createdBy===req.user.id?'owner':(q.memberRank.get(req.params.id,req.user.id)?.rank||'member');if(!['owner','admin'].includes(myR)&&!canManage(req.user.id))return res.status(403).json({error:'No rights'});q.updRank.run(rank,req.params.id,userId);const c=q.commById.get(req.params.id);pushNotif(userId,`⚡ Rank in "${c?.name}": ${rank}`);res.json({ok:true});});
+app.delete('/api/communities/:id',auth,(req,res)=>{const c=q.commById.get(req.params.id);if(!c)return res.status(404).json({error:'NF'});if(c.createdBy!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});q.delComm.run(req.params.id);res.json({ok:true});});
 
-// Notifications
-app.get('/api/notifications',auth,(req,res)=>res.json(DB.notifications.filter(n=>n.uid===req.user.id).sort((a,b)=>new Date(b.ts)-new Date(a.ts))));
-app.post('/api/notifications/read',auth,async(req,res)=>{
-  DB.notifications.filter(n=>n.uid===req.user.id).forEach(n=>n.read=true); saveDB(); res.json({ok:true});
-});
+// GROUPS
+app.get('/api/groups',auth,(req,res)=>res.json(q.groupsForUser.all(req.user.id)));
+app.post('/api/groups',auth,(req,res)=>{const{name}=req.body;if(!name?.trim())return res.status(400).json({error:'Name'});const g={id:'g_'+uid(),name:name.trim(),createdBy:req.user.id,ts:now()};q.insGroup.run(g);q.addGM.run(g.id,req.user.id);res.json(g);});
+app.post('/api/groups/:id/add',auth,(req,res)=>{const g=q.groupById.get(req.params.id);if(!g||g.createdBy!==req.user.id)return res.status(403).json({error:'Forbidden'});q.addGM.run(g.id,req.body.userId);res.json(g);});
 
-// Verify request
-app.post('/api/verify-request',auth,async(req,res)=>{
-  if(DB.verReqs.find(r=>r.uid===req.user.id&&r.status==='pending')) return res.status(400).json({error:'Заявка уже отправлена'});
-  DB.verReqs.push({id:'vr_'+uuid(),uid:req.user.id,status:'pending',ts:new Date().toISOString()});
-  saveDB(); res.json({ok:true});
-});
+// NOTIFS
+app.get('/api/notifications',auth,(req,res)=>res.json(q.notifs.all(req.user.id)));
+app.post('/api/notifications/read',auth,(req,res)=>{q.readNotifs.run(req.user.id);res.json({ok:true});});
 
-// ══════════════════════════════════════════════════
-//  ФОРУМ
-// ══════════════════════════════════════════════════
+// VERIFY
+app.post('/api/verify-request',auth,(req,res)=>{if(q.vrByUser.get(req.user.id))return res.status(400).json({error:'Already sent'});q.insVR.run({id:'vr_'+uid(),uid:req.user.id,ts:now()});res.json({ok:true});});
 
-// Получить все темы форума
-app.get('/api/forum',auth,(_,res)=>{
-  const posts=DB.forumPosts.map(p=>({
-    ...p, author:fu(p.authorId)?{name:fu(p.authorId).name,avatar:fu(p.authorId).avatar,verified:fu(p.authorId).verified,siteRole:fu(p.authorId).siteRole||'user'}:null,
-    replyCount:(p.replies||[]).length
-  })).sort((a,b)=>new Date(b.ts)-new Date(a.ts));
-  res.json(posts);
-});
+// FORUM
+app.get('/api/forum',auth,(_,res)=>res.json(q.allForum.all().map(p=>({...p,pinned:!!p.pinned,author:safe(q.uById.get(p.authorId)),replyCount:q.forumReplies.all(p.id).length}))));
+app.post('/api/forum',auth,(req,res)=>{if(isMuted(req.user.id))return res.status(403).json({error:'Muted'});const{title,text,category,img}=req.body;if(!title?.trim()||!text?.trim())return res.status(400).json({error:'Fill fields'});const p={id:'fp_'+uid(),authorId:req.user.id,title:title.trim(),text:text.trim(),category:category||'general',img:img||null,ts:now()};q.insForum.run(p);q.allUsers.all().filter(u=>isStaff(u.id)).forEach(u=>pushNotif(u.id,`💬 New topic: "${title.substring(0,40)}"`));res.json(eForum(p));});
+app.get('/api/forum/:id',auth,(req,res)=>{const p=q.forumById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});res.json(eForum(p));});
+app.post('/api/forum/:id/reply',auth,(req,res)=>{if(isMuted(req.user.id))return res.status(403).json({error:'Muted'});const p=q.forumById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});if(!isStaff(req.user.id)&&p.authorId!==req.user.id)return res.status(403).json({error:'Staff only'});if(!req.body.text?.trim())return res.status(400).json({error:'Empty'});const r={id:'fr_'+uid(),postId:p.id,authorId:req.user.id,text:req.body.text.trim(),img:req.body.img||null,ts:now()};q.insForumReply.run(r);if(p.authorId!==req.user.id)pushNotif(p.authorId,`💬 ${q.uById.get(req.user.id)?.name} replied to "${p.title.substring(0,30)}"`);res.json(eForum(p));});
+app.delete('/api/forum/:id/reply/:rid',auth,(req,res)=>{const r=q.forumReplyById.get(req.params.rid);if(!r)return res.status(404).json({error:'NF'});if(r.authorId!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});q.delForumReply.run(req.params.rid);res.json({ok:true});});
+app.post('/api/forum/:id/status',auth,staffOnly,(req,res)=>{const p=q.forumById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});q.forumStatus.run(p.status==='open'?'closed':'open',p.id);res.json(eForum(q.forumById.get(p.id)));});
+app.post('/api/forum/:id/pin',auth,(req,res)=>{if(!canManage(req.user.id))return res.status(403).json({error:'No rights'});const p=q.forumById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});q.forumPin.run(p.pinned?0:1,p.id);res.json(eForum(q.forumById.get(p.id)));});
+app.delete('/api/forum/:id',auth,(req,res)=>{const p=q.forumById.get(req.params.id);if(!p)return res.status(404).json({error:'NF'});if(p.authorId!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});q.delForum.run(req.params.id);res.json({ok:true});});
 
-// Создать тему (любой авторизованный)
-app.post('/api/forum',auth,async(req,res)=>{
-  const{title,text,category,img}=req.body;
-  if(!title?.trim()) return res.status(400).json({error:'Укажите заголовок'});
-  if(!text?.trim())  return res.status(400).json({error:'Укажите текст'});
-  const CATS=['general','suggestion','bug','appeal','other'];
-  const cat=CATS.includes(category)?category:'general';
-  const post={
-    id:'fp_'+uuid(), authorId:req.user.id, title:title.trim(),
-    text:text.trim(), category:cat, img:img||null,
-    replies:[], status:'open', pinned:false,
-    ts:new Date().toISOString()
-  };
-  DB.forumPosts.push(post); saveDB();
-  // Уведомить персонал
-  DB.users.filter(u=>hasStaffRole(u.id)).forEach(u=>pushNotif(u.id,`💬 Новая тема на форуме: "${title.trim().substring(0,40)}"`));
-  res.json(post);
-});
+// COMPLAINTS
+app.get('/api/complaints',auth,(req,res)=>{const rows=isStaff(req.user.id)?q.allComplaints.all():q.myComplaints.all(req.user.id);res.json(rows.map(c=>({...c,author:safe(q.uById.get(c.authorId)),replies:q.compReplies.all(c.id).map(r=>({...r,author:safe(q.uById.get(r.authorId))}))})));});
+app.post('/api/complaints',auth,(req,res)=>{const{text,img,targetId,type}=req.body;if(!text?.trim())return res.status(400).json({error:'Describe'});const c={id:'comp_'+uid(),authorId:req.user.id,text:text.trim(),img:img||null,type:type||'other',targetId:targetId||null,ts:now()};q.insComplaint.run(c);q.allUsers.all().filter(u=>isStaff(u.id)).forEach(u=>pushNotif(u.id,`🚩 New complaint from ${q.uById.get(req.user.id)?.name}`));res.json(c);});
+app.delete('/api/complaints/:id',auth,(req,res)=>{const c=q.complaintById.get(req.params.id);if(!c)return res.status(404).json({error:'NF'});if(c.authorId!==req.user.id&&!canManage(req.user.id))return res.status(403).json({error:'Forbidden'});q.delComplaint.run(req.params.id);res.json({ok:true});});
+app.post('/api/complaints/:id/reply',auth,staffOnly,(req,res)=>{const c=q.complaintById.get(req.params.id);if(!c||!req.body.text?.trim())return res.status(400).json({error:'Error'});const r={id:'cr_'+uid(),complaintId:c.id,authorId:req.user.id,text:req.body.text.trim(),ts:now()};q.insCompReply.run(r);pushNotif(c.authorId,`✅ ${q.uById.get(req.user.id)?.name} replied to your complaint`);res.json(r);});
+app.post('/api/complaints/:id/status',auth,staffOnly,(req,res)=>{const{status}=req.body;if(!['pending','reviewing','resolved','rejected'].includes(status))return res.status(400).json({error:'Invalid'});const c=q.complaintById.get(req.params.id);if(!c)return res.status(404).json({error:'NF'});q.complaintStatus.run(status,c.id);pushNotif(c.authorId,`📋 Complaint: ${status}`);res.json({ok:true});});
 
-// Получить одну тему с ответами
-app.get('/api/forum/:id',auth,(req,res)=>{
-  const p=DB.forumPosts.find(x=>x.id===req.params.id);
-  if(!p) return res.status(404).json({error:'Not found'});
-  const enriched={
-    ...p,
-    author: fu(p.authorId)?{name:fu(p.authorId).name,avatar:fu(p.authorId).avatar,verified:fu(p.authorId).verified,siteRole:fu(p.authorId).siteRole||'user'}:null,
-    replies:(p.replies||[]).map(r=>({
-      ...r, author: fu(r.authorId)?{name:fu(r.authorId).name,avatar:fu(r.authorId).avatar,verified:fu(r.authorId).verified,siteRole:fu(r.authorId).siteRole||'user'}:null
-    }))
-  };
-  res.json(enriched);
-});
+// ADMIN
+app.post('/api/admin/broadcast',auth,ownerOnly,(req,res)=>{const{text}=req.body;if(!text?.trim())return res.status(400).json({error:'Empty'});const me=q.uById.get(req.user.id);let sent=0;q.allUsers.all().forEach(u=>{if(u.id===req.user.id)return;const chatId='chat_'+[req.user.id,u.id].sort().join('_');const m={id:'m_'+uid(),chatId,senderId:req.user.id,text:text.trim(),img:null,voice:null,ts:now()};q.insMsg.run(m);sendTo(u.id,{type:'new_message',message:m});pushNotif(u.id,`📢 ${me?.name}: ${text.substring(0,60)}`);sent++;});res.json({ok:true,sent});});
+app.get('/api/admin/stats',auth,ownerOnly,(_,res)=>res.json({users:q.allUsers.all().length,posts:q.allPosts.all().length,online:online.size,stories:q.activeStories.all().length,pendingComplaints:q.allComplaints.all().filter(c=>c.status==='pending').length,pendingVerify:q.pendingVR.all().length}));
+app.get('/api/admin/verReqs',auth,ownerOnly,(_,res)=>res.json(q.pendingVR.all()));
+app.post('/api/admin/verReqs/:id/approve',auth,ownerOnly,(req,res)=>{const r=q.pendingVR.all().find(x=>x.id===req.params.id);if(!r)return res.status(404).json({error:'NF'});q.approveVR.run(r.id);q.setVer.run({v:1,id:r.uid});pushNotif(r.uid,'🎉 Verified!');sendTo(r.uid,{type:'verified'});res.json({ok:true});});
+app.post('/api/admin/verReqs/:id/reject',auth,ownerOnly,(req,res)=>{const r=q.pendingVR.all().find(x=>x.id===req.params.id);if(!r)return res.status(404).json({error:'NF'});q.delVR.run(r.id);pushNotif(r.uid,'❌ Verification rejected');res.json({ok:true});});
+app.post('/api/admin/users/:id/verify',auth,ownerOnly,(req,res)=>{const u=q.uById.get(req.params.id);if(!u)return res.status(404).json({error:'NF'});q.setVer.run({v:u.verified?0:1,id:u.id});if(!u.verified){pushNotif(u.id,'🎉 You are verified!');sendTo(u.id,{type:'verified'});}res.json({ok:true});});
+app.post('/api/admin/users/:id/ban',auth,ownerOnly,(req,res)=>{const{reason,duration}=req.body;const u=q.uById.get(req.params.id);if(!u||u.email===OWNER_EMAIL)return res.status(400).json({error:'Cannot'});q.delBan.run(u.id);const exp=duration?new Date(Date.now()+duration*3600000).toISOString():null;q.insBan.run({id:'b_'+uid(),uid:u.id,reason:reason||'',bannedBy:req.user.id,expiresAt:exp,ts:now()});pushNotif(u.id,`🚫 Banned${duration?` for ${duration}h`:''}: ${reason||'no reason'}`);sendTo(u.id,{type:'banned',reason,expiresAt:exp});res.json({ok:true});});
+app.post('/api/admin/users/:id/unban',auth,ownerOnly,(req,res)=>{q.delBan.run(req.params.id);pushNotif(req.params.id,'✅ Unbanned');res.json({ok:true});});
+app.post('/api/admin/users/:id/mute',auth,(req,res)=>{if(!canManage(req.user.id))return res.status(403).json({error:'No rights'});const{reason,duration}=req.body;const u=q.uById.get(req.params.id);if(!u||u.email===OWNER_EMAIL)return res.status(400).json({error:'Cannot'});q.delMute.run(u.id);const exp=duration?new Date(Date.now()+duration*3600000).toISOString():null;q.insMute.run({id:'mu_'+uid(),uid:u.id,reason:reason||'',mutedBy:req.user.id,expiresAt:exp,ts:now()});pushNotif(u.id,`🔇 Muted${duration?` for ${duration}h`:''}: ${reason||'no reason'}`);sendTo(u.id,{type:'muted',reason,expiresAt:exp});res.json({ok:true});});
+app.post('/api/admin/users/:id/unmute',auth,(req,res)=>{if(!canManage(req.user.id))return res.status(403).json({error:'No rights'});q.delMute.run(req.params.id);pushNotif(req.params.id,'🔊 Unmuted');res.json({ok:true});});
+app.post('/api/admin/users/:id/siteRole',auth,ownerOnly,(req,res)=>{const{role}=req.body;if(!['admin','moderator','helper','user'].includes(role))return res.status(400).json({error:'Invalid'});const u=q.uById.get(req.params.id);if(!u||u.email===OWNER_EMAIL)return res.status(400).json({error:'Cannot'});q.setRole.run({role,id:u.id});pushNotif(u.id,`⚡ Role: ${role}`);sendTo(u.id,{type:'site_role_updated',role});res.json({ok:true});});
+app.delete('/api/admin/users/:id',auth,ownerOnly,(req,res)=>{const u=q.uById.get(req.params.id);if(!u||u.email===OWNER_EMAIL)return res.status(400).json({error:'Cannot'});q.delUser.run(req.params.id);res.json({ok:true});});
+app.delete('/api/admin/posts/:id',auth,ownerOnly,(req,res)=>{q.delPost.run(req.params.id);res.json({ok:true});});
+app.post('/api/admin/communities/:id/verify',auth,ownerOnly,(req,res)=>{const c=q.commById.get(req.params.id);if(!c)return res.status(404).json({error:'NF'});q.setCommVer.run({v:c.verified?0:1,id:c.id});res.json({ok:true});});
+app.delete('/api/admin/communities/:id',auth,ownerOnly,(req,res)=>{q.delComm.run(req.params.id);res.json({ok:true});});
+app.get('/api/health',(_,res)=>res.json({ok:true,ts:now(),online:online.size}));
 
-// Ответить на тему (персонал или автор темы)
-app.post('/api/forum/:id/reply',auth,async(req,res)=>{
-  const p=DB.forumPosts.find(x=>x.id===req.params.id);
-  if(!p) return res.status(404).json({error:'Not found'});
-  // Отвечать может: персонал или автор своей темы
-  if(!hasStaffRole(req.user.id)&&p.authorId!==req.user.id) return res.status(403).json({error:'Только персонал может отвечать'});
-  if(!req.body.text?.trim()) return res.status(400).json({error:'Пустой ответ'});
-  const reply={id:'fr_'+uuid(),authorId:req.user.id,text:req.body.text.trim(),img:req.body.img||null,ts:new Date().toISOString()};
-  if(!p.replies) p.replies=[];
-  p.replies.push(reply);
-  // Уведомить автора
-  if(p.authorId!==req.user.id){
-    const staffUser=fu(req.user.id);
-    pushNotif(p.authorId,`💬 ${staffUser?.name||'Персонал'} ответил на вашу тему "${p.title.substring(0,30)}"`);
-  }
-  saveDB(); res.json(p);
-});
-
-// Закрыть/открыть тему (персонал)
-app.post('/api/forum/:id/status',auth,staffOnly,async(req,res)=>{
-  const p=DB.forumPosts.find(x=>x.id===req.params.id);
-  if(!p) return res.status(404).json({error:'Not found'});
-  p.status=p.status==='open'?'closed':'open'; saveDB(); res.json(p);
-});
-
-// Закрепить тему (admin+)
-app.post('/api/forum/:id/pin',auth,async(req,res)=>{
-  if(!canManageSite(req.user.id)) return res.status(403).json({error:'Нет прав'});
-  const p=DB.forumPosts.find(x=>x.id===req.params.id);
-  if(!p) return res.status(404).json({error:'Not found'});
-  p.pinned=!p.pinned; saveDB(); res.json(p);
-});
-
-// Удалить тему (admin+)
-app.delete('/api/forum/:id',auth,async(req,res)=>{
-  if(!canManageSite(req.user.id)) return res.status(403).json({error:'Нет прав'});
-  DB.forumPosts=DB.forumPosts.filter(x=>x.id!==req.params.id); saveDB(); res.json({ok:true});
-});
-
-// ══════════════════════════════════════════════════
-//  ЖАЛОБЫ
-// ══════════════════════════════════════════════════
-
-app.get('/api/complaints',auth,(req,res)=>{
-  // Пользователь видит только свои жалобы, персонал — все
-  if(hasStaffRole(req.user.id)){
-    return res.json(DB.complaints.map(c=>({
-      ...c, author:fu(c.authorId)?{name:fu(c.authorId).name,avatar:fu(c.authorId).avatar}:null,
-      targetUser:c.targetId?fu(c.targetId)?{name:fu(c.targetId).name}:null:null
-    })).sort((a,b)=>new Date(b.ts)-new Date(a.ts)));
-  }
-  res.json(DB.complaints.filter(c=>c.authorId===req.user.id).sort((a,b)=>new Date(b.ts)-new Date(a.ts)));
-});
-
-app.post('/api/complaints',auth,async(req,res)=>{
-  const{text,img,targetId,type}=req.body;
-  if(!text?.trim()) return res.status(400).json({error:'Опишите проблему'});
-  const TYPES=['user','post','community','admin','other'];
-  const complaint={
-    id:'comp_'+uuid(), authorId:req.user.id,
-    text:text.trim(), img:img||null,
-    targetId:targetId||null,
-    type:TYPES.includes(type)?type:'other',
-    status:'pending', replies:[],
-    ts:new Date().toISOString()
-  };
-  DB.complaints.push(complaint); saveDB();
-  DB.users.filter(u=>hasStaffRole(u.id)).forEach(u=>pushNotif(u.id,`🚩 Новая жалоба от ${fu(req.user.id)?.name||'?'}`));
-  res.json(complaint);
-});
-
-// Ответить на жалобу (только персонал)
-app.post('/api/complaints/:id/reply',auth,staffOnly,async(req,res)=>{
-  const c=DB.complaints.find(x=>x.id===req.params.id);
-  if(!c) return res.status(404).json({error:'Not found'});
-  if(!req.body.text?.trim()) return res.status(400).json({error:'Пустой ответ'});
-  const reply={id:'cr_'+uuid(),authorId:req.user.id,text:req.body.text.trim(),ts:new Date().toISOString()};
-  if(!c.replies) c.replies=[];
-  c.replies.push(reply);
-  const staffUser=fu(req.user.id);
-  pushNotif(c.authorId,`✅ ${staffUser?.name||'Персонал'} ответил на вашу жалобу`);
-  saveDB(); res.json(c);
-});
-
-// Изменить статус жалобы (персонал)
-app.post('/api/complaints/:id/status',auth,staffOnly,async(req,res)=>{
-  const c=DB.complaints.find(x=>x.id===req.params.id);
-  if(!c) return res.status(404).json({error:'Not found'});
-  const{status}=req.body;
-  if(!['pending','reviewing','resolved','rejected'].includes(status)) return res.status(400).json({error:'Неверный статус'});
-  c.status=status; saveDB();
-  const labels={pending:'В ожидании',reviewing:'Рассматривается',resolved:'Решена',rejected:'Отклонена'};
-  pushNotif(c.authorId,`📋 Статус вашей жалобы изменён: ${labels[status]}`);
-  res.json(c);
-});
-
-// ══════════════════════════════════════════════════
-//  РОЛИ САЙТА (только owner)
-// ══════════════════════════════════════════════════
-
-app.post('/api/admin/users/:id/siteRole',auth,ownerOnly,async(req,res)=>{
-  const u=fu(req.params.id);
-  if(!u) return res.status(404).json({error:'Not found'});
-  if(u.email===OWNER_EMAIL) return res.status(400).json({error:'Нельзя изменить роль владельца'});
-  const{role}=req.body;
-  if(!['admin','moderator','helper','user'].includes(role)) return res.status(400).json({error:'Неверная роль'});
-  u.siteRole=role; saveDB();
-  const labels={admin:'Администратор',moderator:'Модератор',helper:'Помощник',user:'Пользователь'};
-  pushNotif(u.id,`⚡ Вам назначена роль "${labels[role]}" на сайте`);
-  sendTo(u.id,{type:'site_role_updated',role});
-  res.json({ok:true});
-});
-
-// ══════════════════════════════════════════════════
-//  ADMIN
-// ══════════════════════════════════════════════════
-
-app.post('/api/admin/broadcast',auth,ownerOnly,async(req,res)=>{
-  const{text}=req.body; if(!text?.trim()) return res.status(400).json({error:'Пустой текст'});
-  const sender=fu(req.user.id);
-  DB.users.forEach(u=>{
-    if(u.id===req.user.id) return;
-    const chatId='chat_'+[req.user.id,u.id].sort().join('_');
-    const msg={id:'m_'+uuid(),chatId,senderId:req.user.id,text:text.trim(),img:null,voice:null,ts:new Date().toISOString()};
-    DB.messages.push(msg);
-    sendTo(u.id,{type:'new_message',message:msg});
-    pushNotif(u.id,`📢 ${sender?.name||'Администратор'}: ${text.trim().substring(0,60)}`);
-  });
-  saveDB(); res.json({ok:true,sent:DB.users.length-1});
-});
-
-app.get('/api/admin/stats',auth,ownerOnly,(_,res)=>res.json({
-  users:DB.users.length, posts:DB.posts.length+DB.commPosts.length,
-  communities:DB.communities.length, messages:DB.messages.length,
-  pendingVerify:DB.verReqs.filter(r=>r.status==='pending').length,
-  banned:DB.bans.length, verified:DB.users.filter(u=>u.verified).length,
-  online:onlineSet.size, forumPosts:DB.forumPosts.length,
-  complaints:DB.complaints.filter(c=>c.status==='pending').length
-}));
-app.get('/api/admin/verReqs',auth,ownerOnly,(_,res)=>res.json(DB.verReqs));
-app.post('/api/admin/verReqs/:id/approve',auth,ownerOnly,async(req,res)=>{
-  const r=DB.verReqs.find(x=>x.id===req.params.id); if(!r) return res.status(404).json({error:'Not found'});
-  r.status='approved'; const u=fu(r.uid);
-  if(u){u.verified=true;pushNotif(u.id,'🎉 Ваш аккаунт верифицирован!');sendTo(u.id,{type:'verified'});}
-  saveDB(); res.json({ok:true});
-});
-app.post('/api/admin/verReqs/:id/reject',auth,ownerOnly,async(req,res)=>{
-  const idx=DB.verReqs.findIndex(x=>x.id===req.params.id); if(idx<0) return res.status(404).json({error:'Not found'});
-  const r=DB.verReqs.splice(idx,1)[0]; pushNotif(r.uid,'❌ Заявка на верификацию отклонена'); saveDB(); res.json({ok:true});
-});
-app.post('/api/admin/users/:id/ban',auth,ownerOnly,async(req,res)=>{
-  const uid=req.params.id; if(fu(uid)?.email===OWNER_EMAIL) return res.status(400).json({error:'Нельзя'});
-  if(!DB.bans.find(b=>b.uid===uid)) DB.bans.push({uid,ts:new Date().toISOString()});
-  pushNotif(uid,'🚫 Ваш аккаунт заблокирован'); sendTo(uid,{type:'banned'}); saveDB(); res.json({ok:true});
-});
-app.post('/api/admin/users/:id/unban',auth,ownerOnly,async(req,res)=>{
-  DB.bans=DB.bans.filter(b=>b.uid!==req.params.id); pushNotif(req.params.id,'✅ Вы разблокированы'); saveDB(); res.json({ok:true});
-});
-app.post('/api/admin/users/:id/verify',auth,ownerOnly,async(req,res)=>{
-  const u=fu(req.params.id); if(!u) return res.status(404).json({error:'Not found'});
-  u.verified=!u.verified; if(u.verified){pushNotif(u.id,'🎉 Вы верифицированы!');sendTo(u.id,{type:'verified'});}
-  saveDB(); res.json({ok:true});
-});
-app.delete('/api/admin/users/:id',auth,ownerOnly,async(req,res)=>{
-  const uid=req.params.id; if(fu(uid)?.email===OWNER_EMAIL) return res.status(400).json({error:'Нельзя'});
-  DB.users=DB.users.filter(u=>u.id!==uid); DB.posts=DB.posts.filter(p=>p.authorId!==uid);
-  DB.commPosts=DB.commPosts.filter(p=>p.authorId!==uid); DB.messages=DB.messages.filter(m=>m.senderId!==uid);
-  DB.friendships=DB.friendships.filter(f=>f.from!==uid&&f.to!==uid); DB.commMembers=DB.commMembers.filter(m=>m.uid!==uid);
-  DB.bans=DB.bans.filter(b=>b.uid!==uid); DB.users.forEach(u=>{u.friends=(u.friends||[]).filter(id=>id!==uid);});
-  saveDB(); res.json({ok:true});
-});
-app.delete('/api/admin/posts/:id',auth,ownerOnly,async(req,res)=>{
-  DB.posts=DB.posts.filter(p=>p.id!==req.params.id); DB.commPosts=DB.commPosts.filter(p=>p.id!==req.params.id); saveDB(); res.json({ok:true});
-});
-app.post('/api/admin/communities/:id/verify',auth,ownerOnly,async(req,res)=>{
-  const c=fc(req.params.id); if(!c) return res.status(404).json({error:'Not found'}); c.verified=!c.verified; saveDB(); res.json({ok:true});
-});
-app.delete('/api/admin/communities/:id',auth,ownerOnly,async(req,res)=>{
-  const cid=req.params.id;
-  DB.communities=DB.communities.filter(c=>c.id!==cid); DB.commMembers=DB.commMembers.filter(m=>m.cid!==cid);
-  DB.commPosts=DB.commPosts.filter(p=>p.communityId!==cid); saveDB(); res.json({ok:true});
-});
-
-app.get('/api/health',(_,res)=>res.json({ok:true,ts:new Date().toISOString(),online:onlineSet.size}));
-
-// Запуск
 async function main(){
-  await loadDB();
-  if(!DB.users.find(u=>u.email===OWNER_EMAIL)){
-    const hash=await bcrypt.hash(OWNER_PASS,10);
-    DB.users.push({id:'user_owner',email:OWNER_EMAIL,password:hash,name:'Foxi005305',username:'@foxi',bio:'👑 Владелец KNB',avatar:'',banner:'',verified:true,siteRole:'owner',friends:[],createdAt:new Date().toISOString()});
-    DB.posts.push({id:'p_welcome',authorId:'user_owner',text:'👋 Добро пожаловать в KNB! 2026',media:null,likes:[],comments:[],ts:new Date().toISOString()});
-    await saveNow();
-    console.log('[KNB] Owner created');
-  }
-  server.listen(PORT,'0.0.0.0',()=>console.log(`[KNB] Port ${PORT}`));
+  if(!q.uByEmail.get(OWNER_EMAIL)){const hash=await bcrypt.hash(OWNER_PASS,10);q.insUser.run({id:'user_owner',email:OWNER_EMAIL,password:hash,name:'Foxi',username:'@foxi',bio:'',avatar:'',banner:'',createdAt:now()});q.setRole.run({role:'owner',id:'user_owner'});q.setVer.run({v:1,id:'user_owner'});console.log('[KNB] Owner created');}
+  server.listen(PORT,'0.0.0.0',()=>console.log(`[KNB] ✅ Port ${PORT}`));
 }
 main().catch(console.error);
